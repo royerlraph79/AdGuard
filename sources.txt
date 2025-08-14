@@ -1,7 +1,12 @@
 https://raw.githubusercontent.com/anudeepND/blacklist/master/adservers.txt
 https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
-# https://energized.pro/blu/adblock.txt
-https://energized.pro/spark/adblock.txt
+https://energized.pro/blu/adblock.txt
+# https://energized.pro/spark/adblock.txt
+https://energized.pro/regional/adblock.txt
+https://energized.pro/antipopads-re/adblock.txt
 https://badmojr.github.io/1Hosts/Lite/adblock.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt
 https://raw.githubusercontent.com/jerryn70/GoodbyeAds/master/Formats/GoodbyeAds-AdBlock-Filter.txt
+https://blocklistproject.github.io/Lists/basic.txt
+https://blocklistproject.github.io/Lists/tracking.txt
+https://blocklistproject.github.io/Lists/ads.txt
