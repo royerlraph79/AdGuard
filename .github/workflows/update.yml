@@ -1,4 +1,4 @@
-name: Update AdGuard Blocklist (dist branch)
+name: Update AdGuard Blocklist (main branch)
 
 on:
   workflow_dispatch: {}
@@ -16,6 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,86 +38,12 @@ jobs:
         run: |
           set -e
           python convert_hosts.py
-          echo "== Build directory =="
-          ls -la
           echo "== Preview (head -n 20) =="
           head -n 20 adguard_blocklist.txt
-          echo "== Rule count =="
-          grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true
+          RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
+          echo "Rule count: $RULES"
 
-      - name: Ensure output exists
-        run: |
-          set -e
-          test -f adguard_blocklist.txt || { echo "❌ adguard_blocklist.txt not found"; exit 1; }
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: adguard-blocklist
-          path: adguard_blocklist.txt
-          if-no-files-found: error
-          retention-days: 1
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository (for dist branch ops)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: adguard-blocklist
-          path: artifacts
-
-      - name: Verify artifact exists
-        shell: bash
-        run: |
-          set -e
-          echo "== Artifacts dir =="
-          ls -la artifacts || true
-          if [[ ! -f "artifacts/adguard_blocklist.txt" ]]; then
-            echo "❌ artifacts/adguard_blocklist.txt not found. Check the build job logs."
-            exit 1
-          fi
-
-      - name: Prepare dist branch
-        shell: bash
-        run: |
-          set -e
-          git fetch origin +refs/heads/dist:refs/remotes/origin/dist || true
-          if git show-ref --verify --quiet refs/remotes/origin/dist; then
-            echo "dist branch exists."
-            git checkout -B dist origin/dist
-          else
-            echo "Creating dist branch (orphan)."
-            git checkout --orphan dist
-            # Clean working tree but keep .git
-            shopt -s dotglob
-            for p in * .*; do
-              [[ "$p" == "." || "$p" == ".." || "$p" == ".git" ]] && continue
-              rm -rf -- "$p"
-            done
-          fi
-
-      - name: Replace contents with built file (keep .git)
-        shell: bash
-        run: |
-          set -e
-          # Remove everything except .git
-          shopt -s dotglob
-          for p in * .*; do
-            [[ "$p" == "." || "$p" == ".." || "$p" == ".git" ]] && continue
-            rm -rf -- "$p"
-          done
-          # Copy artifact into root
-          cp -f artifacts/adguard_blocklist.txt ./adguard_blocklist.txt
-          git add adguard_blocklist.txt
-
-      - name: Commit if changed (dist) with rule count
+      - name: Commit if changed
         shell: bash
         run: |
           set -e
@@ -124,14 +51,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l | awk '{print $1}')
           TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          if [[ -n "$(git status --porcelain)" ]]; then
-            git commit -m "dist: update blocklist (rules: ${RULES}) (${TS})"
-            git push origin dist
+          if [[ -n "$(git status --porcelain adguard_blocklist.txt)" ]]; then
+            git add adguard_blocklist.txt
+            git commit -m "update blocklist (rules: ${RULES}) (${TS})"
+            git push origin main
           else
-            echo "No changes on dist."
+            echo "No changes to commit."
           fi
-
-      - name: Delete workflow run artifacts
-        uses: geekyeggo/delete-artifact@v5
-        with:
-          name: adguard-blocklist
