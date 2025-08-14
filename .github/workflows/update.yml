@@ -35,8 +35,19 @@ jobs:
           EXTRAS_BLOCK_FILE: extras_block.txt
           ENABLE_SUBSUMPTION: "1"
         run: |
+          set -e
           python convert_hosts.py
-          ls -lh adguard_blocklist.txt
+          echo "== Build directory =="
+          ls -la
+          echo "== Preview (head -n 20) =="
+          head -n 20 adguard_blocklist.txt
+          echo "== Rule count =="
+          grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true
+
+      - name: Ensure output exists
+        run: |
+          set -e
+          test -f adguard_blocklist.txt || { echo "❌ adguard_blocklist.txt not found"; exit 1; }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -61,6 +72,17 @@ jobs:
           name: adguard-blocklist
           path: artifacts
 
+      - name: Verify artifact exists
+        shell: bash
+        run: |
+          set -e
+          echo "== Artifacts dir =="
+          ls -la artifacts || true
+          if [[ ! -f "artifacts/adguard_blocklist.txt" ]]; then
+            echo "❌ artifacts/adguard_blocklist.txt not found. Check the build job logs."
+            exit 1
+          fi
+
       - name: Prepare dist branch
         shell: bash
         run: |
@@ -72,6 +94,7 @@ jobs:
           else
             echo "Creating dist branch (orphan)."
             git checkout --orphan dist
+            # Clean working tree but keep .git
             shopt -s dotglob
             for p in * .*; do
               [[ "$p" == "." || "$p" == ".." || "$p" == ".git" ]] && continue
@@ -83,11 +106,13 @@ jobs:
         shell: bash
         run: |
           set -e
+          # Remove everything except .git
           shopt -s dotglob
           for p in * .*; do
             [[ "$p" == "." || "$p" == ".." || "$p" == ".git" ]] && continue
             rm -rf -- "$p"
           done
+          # Copy artifact into root
           cp -f artifacts/adguard_blocklist.txt ./adguard_blocklist.txt
           git add adguard_blocklist.txt
 
@@ -97,11 +122,8 @@ jobs:
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Count rules: lines of the form ||something^ (ignore comments/header)
           RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l | awk '{print $1}')
           TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-
           if [[ -n "$(git status --porcelain)" ]]; then
             git commit -m "dist: update blocklist (rules: ${RULES}) (${TS})"
             git push origin dist
