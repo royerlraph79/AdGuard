@@ -172,7 +172,7 @@ def build_comment_header(rule_count: int) -> List[str]:
 def write_output(domains: Iterable[str], output_path: str) -> int:
     clean_rules = [f"||{d.strip()}^" for d in sorted(domains) if d.strip()]
     rule_count = len(clean_rules)
-    lines = [*build_comment_header(rule_count), "", *clean_rules]
+    lines = build_comment_header(rule_count) + clean_rules
     text = "\n".join(lines).strip() + "\n"
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -193,22 +193,18 @@ def main() -> int:
         except Exception as e:
             print(f"  ! Failed {url}: {e}", file=sys.stderr)
 
-    # Extra blocklist
     for ln in read_lines_if_exists(EXTRAS_BLOCK_FILE):
         if ln and not ln.startswith(COMMENT_PREFIXES) and not ln.startswith("@@"):
             d = normalize_domain(ln)
             if d:
                 all_domains.add(d)
 
-    # Apply allowlist
     allow: Set[str] = {normalize_domain(ln) for ln in read_lines_if_exists(ALLOWLIST_FILE) if ln}
     if allow:
         before = len(all_domains)
         all_domains = {d for d in all_domains if d not in allow}
         print(f"Allowlist removed {before - len(all_domains)} domains.")
 
-    # Deduplication + Subsumption
-    all_domains = set(all_domains)
     if ENABLE_SUBSUMPTION:
         before = len(all_domains)
         all_domains, pruned = compress_by_subsumption(all_domains)
