@@ -10,4 +10,5 @@ https://raw.githubusercontent.com/jerryn70/GoodbyeAds/master/Formats/GoodbyeAds-
 https://blocklistproject.github.io/Lists/basic.txt
 https://blocklistproject.github.io/Lists/tracking.txt
 https://blocklistproject.github.io/Lists/ads.txt
-https://small.oisd.nl
+# https://small.oisd.nl
+https://big.oisd.nl
