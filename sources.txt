@@ -4,6 +4,3 @@ https://energized.pro/blu/adblock.txt
 https://badmojr.github.io/1Hosts/Lite/adblock.txt
 # https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.mini.txt
-# https://raw.githubusercontent.com/blocklistproject/Lists/refs/heads/master/adguard/basic-ags.txt
-# https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt
-# https://blocklistproject.github.io//Lists/adguard/ads-ags.txt
