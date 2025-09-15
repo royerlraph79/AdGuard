@@ -4,7 +4,7 @@ https://energized.pro/blu/adblock.txt
 https://badmojr.github.io/1Hosts/Lite/adblock.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.mini.txt
 https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext
-https://easylist-downloads.adblockplus.org/easyprivacy.txt
+# https://easylist-downloads.adblockplus.org/easyprivacy.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/urlshortener.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/spam-tlds.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt
