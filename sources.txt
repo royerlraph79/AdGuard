@@ -11,7 +11,6 @@ https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/hoster.txt
 https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt
 https://blocklistproject.github.io/Lists/basic.txt
-https://blocklistproject.github.io/Lists/adguard/ads-ags.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/popupads.txt
 https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt
 https://energized.pro/antipopads-re/adblock.txt
