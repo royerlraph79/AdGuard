@@ -8,12 +8,13 @@ https://easylist-downloads.adblockplus.org/easyprivacy.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/urlshortener.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/spam-tlds.txt
 # https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/pro.plus.mini.txt
-https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.medium.txt
+# https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.medium.txt
+https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/hoster.txt
 https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt
 https://blocklistproject.github.io/Lists/basic.txt
 https://blocklistproject.github.io/Lists/adguard/ads-ags.txt
-https://blocklistproject.github.io/Lists/adguard/redirect-ags.txt
-https://blocklistproject.github.io/Lists/adguard/phishing-ags.txt
+# https://blocklistproject.github.io/Lists/adguard/redirect-ags.txt
+# https://blocklistproject.github.io/Lists/adguard/phishing-ags.txt
 https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/popupads.txt
 https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt
