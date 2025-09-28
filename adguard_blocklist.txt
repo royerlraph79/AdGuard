@@ -5,7 +5,7 @@
 !  - Adblock/uBO rules and URLs in sources are parsed and converted to hostnames
 !  - Redundant subdomains are removed if a parent rule exists
 ! Rule count: 244270
-! Last generated: 2025-09-27 20:05:53 EDT
+! Last generated: 2025-09-27 20:10:46 EDT
 ||0-02.net^
 ||0-app.com^
 ||0.myikas.com^
