@@ -4,8 +4,8 @@
 !  - '@@' exception lines are ignored
 !  - Adblock/uBO rules and URLs in sources are parsed and converted to hostnames
 !  - Redundant subdomains are removed if a parent rule exists
-! Rule count: 250854
-! Last generated: 2025-11-13 20:06:31 EST
+! Rule count: 250875
+! Last generated: 2025-11-13 22:52:32 EST
 ||0-02.net^
 ||0-ads.developer-sg.tiktok.com^
 ||0-adv.data.garenanow.com^
@@ -41882,6 +41882,7 @@
 ||bxlsct.ex-shop.net^
 ||bxlulr.icu^
 ||bxmlsu.aluahotels.com^
+||bxmo.cn^
 ||bxmyyupyexyci.space^
 ||bxpirsojnnuvq.xyz^
 ||bxpqva.housemate-navi.jp^
@@ -54043,6 +54044,7 @@
 ||criitpoy.com^
 ||crilns.com^
 ||crimeagc.com^
+||criminaldraw.pro^
 ||crimitating.com^
 ||crimpedhydrids.click^
 ||crimpedrodmen.com^
@@ -68793,6 +68795,7 @@
 ||e42a97f917c8.top^
 ||e43270a814.top^
 ||e43ef7f183.6a1e09565a.com^
+||e4577d6fef.com^
 ||e459.kcci.com^
 ||e4595352141e7851f5e23deac1036ffffb87f18d3aaec48181967c1ef2805d9.link^
 ||e4806198fcec979cfcc060e69623d418.sbs^
@@ -70165,6 +70168,7 @@
 ||eesoavoath.net^
 ||eessoong.com^
 ||eetamseethe.com^
+||eetchauglair.net^
 ||eetchooxanu.net^
 ||eetdi.goggles4u.co.uk^
 ||eetensalus.qpon^
@@ -73004,6 +73008,7 @@
 ||eqcpn.semcostura.com^
 ||eqddkngvrgvkw.site^
 ||eqfqekkgkwpya.online^
+||eqfrsqiui.com^
 ||eqgmnmqlz.com^
 ||eqieg6yn5.com^
 ||eqit9pzsxz.appspot.com^
@@ -78553,6 +78558,7 @@
 ||fl7v51rs.pl4y.download^
 ||flabbymatt.com^
 ||flacasp0.tranquilpinnacle.com^
+||flackersagina.rest^
 ||flaegrudad.com^
 ||flagads.net^
 ||flagcounter.com^
@@ -105604,6 +105610,7 @@
 ||job-netflix.com^
 ||job-online.petrovka.info^
 ||jobamatic.com^
+||jobbetkatik.rest^
 ||jobbingunnet.shop^
 ||jobbio.com^
 ||jobdnes.cz^
@@ -109422,6 +109429,7 @@
 ||kreomfoq.com^
 ||kreps.xyz^
 ||krevn0cq4.com^
+||krfcjcqcvj.com^
 ||krfqlrxvmoyrj.online^
 ||krfxvi.iconbydesign.com.au^
 ||krgtzg.t-nation.com^
@@ -110079,6 +110087,7 @@
 ||kz2oq0xm6ie7gn5dkswlpv6mfgci8yoe3xlqp12gjotp5fdjxs5ckztb8rzn.codes^
 ||kz9c.piguiqproxy.com^
 ||kzagvdulumvgl.site^
+||kzampgfftpiao.online^
 ||kzaqyr.professional-store.com^
 ||kzayak.com^
 ||kzcsv.ehplabs.sg^
@@ -126454,6 +126463,7 @@
 ||mens.herbacia.xyz^
 ||mens.ssfonline.co.uk^
 ||mensch.ekd.de^
+||mensejuverna.rest^
 ||mensfjb.qpon^
 ||menshealthweb.co^
 ||menslifexxl.site^
@@ -151631,6 +151641,7 @@
 ||ofyuxfqhsexkj.online^
 ||ofzaqfcrfyaqd.com^
 ||ofzqe.red-equipment.us^
+||ofzrqtpcrvnet.online^
 ||og-live.com^
 ||og-shopee9.com^
 ||og.stickumpennine.rest^
@@ -168139,6 +168150,7 @@
 ||qjrvummavqjtr.website^
 ||qjskjiztddgxp.store^
 ||qjudfh.hh-taiwan.com.tw^
+||qjuxbatoptcwi.website^
 ||qjuy.cn^
 ||qjvksieybn.vip^
 ||qjwcjt.revolveclothing.com^
@@ -168394,6 +168406,7 @@
 ||qonbibff.icu^
 ||qonline-src.com^
 ||qonwdq.helmexpress.com^
+||qoocckkeuusm.com^
 ||qooic.com^
 ||qooig.jomajewellery.com^
 ||qoold.furtunaskin.com^
@@ -169414,6 +169427,7 @@
 ||qyocjtomywhy.com^
 ||qyoprobasxtbk.store^
 ||qyozz.lyfd2xzauti9d8p.bapb.gdn^
+||qyplvnzcm1.com^
 ||qypuqv.costcuttersuk.com^
 ||qypvnb.24mx.it^
 ||qypyleahjucze.com^
@@ -173064,6 +173078,7 @@
 ||rhvlk.trinaturk.com^
 ||rhwajoghefysf.site^
 ||rhwvvl.andrewmarc.com^
+||rhxawvxgqrawy.space^
 ||rhxdsplm.com^
 ||rhybey.gap.co.jp^
 ||rhymezebra.com^
@@ -188225,6 +188240,7 @@
 ||silphidbilati.com^
 ||silstop.pl^
 ||siltsdespend.life^
+||siluricidotea.shop^
 ||silvalliant.info^
 ||silveragesoftware.com^
 ||silverangleshookup.com^
@@ -196560,6 +196576,7 @@
 ||sqvnf.sneakerpolitics.com^
 ||sqwgwm.infocasas.com.uy^
 ||sqwwhdckyewdnlu.net^
+||sqyuxifbrkuez.website^
 ||sqzfj.landmarkathletics.com^
 ||sqzwjufya.com^
 ||sr-amazon.com^
@@ -227796,6 +227813,7 @@
 ||twujydoj.werkenbijwesseling.nl^
 ||twutter.com^
 ||twvgoaewdmluf.online^
+||twvsgpryygplmcw.com^
 ||twwitter.com^
 ||twxftd.icu^
 ||twyn.com^
@@ -230868,6 +230886,7 @@
 ||ushtinet01.hds.com^
 ||ushtinet02.hds.com^
 ||ushue.com^
+||usiablwvpqmqr.site^
 ||usicdn.com^
 ||usihecbkdzxbw.site^
 ||usingageghoaft.net^
@@ -232262,6 +232281,7 @@
 ||variable-advice.com^
 ||variablefitness.com^
 ||variablehour.com^
+||variantfibula.rest^
 ||variantswatches.apphb.com^
 ||variations.brave.com^
 ||variationsradio.com^
@@ -240976,6 +240996,7 @@
 ||wss.hbpl.co.uk^
 ||wss.pollfish.com^
 ||wsshehasnomoney.com^
+||wssnddllssomv.space^
 ||wsssaunhzztxj.store^
 ||wssuperar.click^
 ||wssxudxjuemps.com^
