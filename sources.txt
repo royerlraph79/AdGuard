@@ -15,3 +15,4 @@ https://blocklistproject.github.io/Lists/basic.txt
 # https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt
 # https://energized.pro/antipopads-re/adblock.txt
 # https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/native.apple.txt
+https://filters.adtidy.org/ios/filters/11_optimized.tx
