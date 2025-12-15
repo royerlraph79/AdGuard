@@ -1,130 +1,154 @@
 import re
 import requests
-from typing import Set
+from typing import Set, Tuple, Dict
 
-# Only match explicit 0.0.0.0 / 127.0.0.1 / ::1 entries
 HOSTS_RE = re.compile(
     r"^\s*(?P<ip>0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?P<domain>[^\s#]+)",
     re.IGNORECASE
 )
 
-# Skip comments starting with any of these
 COMMENT_PREFIXES = ("#", "!", "//", ";")
-
-# Sources list file
 SOURCE_FILE = "sources.txt"
-
-# Output blocklist file
 OUTPUT_FILE = "adguard_blocklist.txt"
 
 
 def normalize_domain(d: str) -> str:
-    """Normalize domain by stripping unwanted parts."""
     d = d.strip().lower()
-
-    # Strip protocol
     if d.startswith("http://") or d.startswith("https://"):
         d = re.sub(r"^https?://", "", d)
-
-    # Remove paths
     d = d.split("/")[0]
-
-    # Handle wildcard entries
     if d.startswith("*."):
         d = d[2:]
-
-    # Remove port numbers
     d = d.split(":")[0]
-
-    # Remove trailing dot
     if d.endswith("."):
         d = d[:-1]
-
-    # Sanity check
-    if not d or "." not in d:
-        return ""
-
-    return d
+    return d if "." in d else ""
 
 
 def extract_domain_from_adblock_rule(rule: str) -> str:
-    """Extract domain from AdBlock-style rule if possible."""
-    # Skip exception rules
     if rule.startswith("@@"):
         return ""
-
-    # Try standard AdBlock syntax
     match = re.match(r"^\|\|([^\^/]+)", rule)
-    if match:
-        return match.group(1)
-
-    return ""
+    return match.group(1) if match else ""
 
 
-def load_domains_from_url(url: str) -> Set[str]:
-    print(f"Fetching: {url}")
+def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str, int]]:
+    print(f"\n🔗 Fetching: {url}")
     try:
         r = requests.get(url, timeout=30)
         r.raise_for_status()
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return set()
+        print(f"❌ Error fetching {url}: {e}")
+        return set(), {}
 
     text = r.text
     domains = set()
+    stats = {
+        "total_lines": 0,
+        "adblock_rules": 0,
+        "hosts_rules": 0,
+        "plain_domains": 0,
+        "invalid_lines": 0,
+        "added": 0,
+        "duplicates": 0  # This won't be printed per-source
+    }
 
     for raw in text.splitlines():
+        stats["total_lines"] += 1
         ln = raw.strip()
         if not ln or ln.startswith(COMMENT_PREFIXES):
+            stats["invalid_lines"] += 1
             continue
 
         token = None
-
-        # Try to extract domain from AdBlock-style rule
         ab = extract_domain_from_adblock_rule(ln)
         if ab:
             token = ab
+            stats["adblock_rules"] += 1
         else:
-            # Try to match 0.0.0.0 or 127.0.0.1 hosts format
             m = HOSTS_RE.match(ln)
             if m:
                 token = m.group("domain")
+                stats["hosts_rules"] += 1
             else:
-                # Try plain domain line
                 parts = ln.split()
                 if parts:
                     token = parts[0]
+                    stats["plain_domains"] += 1
 
         if not token:
+            stats["invalid_lines"] += 1
             continue
 
         domain = normalize_domain(token)
-        if domain:
-            domains.add(domain)
+        if not domain:
+            stats["invalid_lines"] += 1
+            continue
 
-    return domains
+        if domain in seen:
+            stats["duplicates"] += 1
+            continue
+
+        seen.add(domain)
+        domains.add(domain)
+        stats["added"] += 1
+
+    return domains, stats
 
 
 def main():
-    print("Reading source URLs...")
+    print("📄 Reading source URLs...")
     with open(SOURCE_FILE, "r") as f:
         urls = [line.strip() for line in f if line.strip() and not line.startswith(COMMENT_PREFIXES)]
 
     all_domains = set()
+    overall_stats = {
+        "sources": 0,
+        "total_domains": 0,
+        "adblock_rules": 0,
+        "hosts_rules": 0,
+        "plain_domains": 0,
+        "invalid_lines": 0,
+        "duplicates": 0,
+        "added": 0,
+        "parsed_total": 0
+    }
 
     for url in urls:
-        domains = load_domains_from_url(url)
-        print(f"✔ {len(domains)} domains from {url}")
-        all_domains.update(domains)
+        domains, stats = load_domains_from_url(url, all_domains)
+        overall_stats["sources"] += 1
+        overall_stats["total_domains"] += len(domains)
+        overall_stats["parsed_total"] += stats["total_lines"]
 
-    print(f"\nTotal unique domains: {len(all_domains)}")
-    print(f"Writing to {OUTPUT_FILE}...")
+        for k in stats:
+            overall_stats[k] += stats[k]
 
+        print(f"📊 Stats for {url}")
+        print(f"  Total lines:     {stats['total_lines']}")
+        print(f"  Adblock rules:   {stats['adblock_rules']}")
+        print(f"  Hosts rules:     {stats['hosts_rules']}")
+        print(f"  Plain domains:   {stats['plain_domains']}")
+        print(f"  Invalid lines:   {stats['invalid_lines']}")
+        print(f"  Added domains:   {stats['added']}")
+
+    print(f"\n✅ Writing combined list to: {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w") as f:
         for d in sorted(all_domains):
             f.write(f"||{d}^\n")
 
-    print("Done ✅")
+    # Final deduplication summary
+    deduped = overall_stats["parsed_total"] - len(all_domains)
+    print("\n📈 Overall Summary:")
+    print(f"  Sources read:     {overall_stats['sources']}")
+    print(f"  Total lines:      {overall_stats['parsed_total']}")
+    print(f"  Unique domains:   {len(all_domains)}")
+    print(f"  Adblock parsed:   {overall_stats['adblock_rules']}")
+    print(f"  Hosts parsed:     {overall_stats['hosts_rules']}")
+    print(f"  Plain parsed:     {overall_stats['plain_domains']}")
+    print(f"  Invalid lines:    {overall_stats['invalid_lines']}")
+    print(f"  Duplicates found: {overall_stats['duplicates']}")
+    print(f"  Deduplicated:     {deduped}")
+    print("\n🏁 Done!")
 
 
 if __name__ == "__main__":
