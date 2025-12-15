@@ -2,6 +2,7 @@ import re
 import requests
 from typing import Set, Tuple, Dict
 
+# Match lines like: 0.0.0.0 domain.com
 HOSTS_RE = re.compile(
     r"^\s*(?P<ip>0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?P<domain>[^\s#]+)",
     re.IGNORECASE
@@ -10,6 +11,17 @@ HOSTS_RE = re.compile(
 COMMENT_PREFIXES = ("#", "!", "//", ";")
 SOURCE_FILE = "sources.txt"
 OUTPUT_FILE = "adguard_blocklist.txt"
+
+# Default stat structure for each source
+DEFAULT_STATS = {
+    "total_lines": 0,
+    "adblock_rules": 0,
+    "hosts_rules": 0,
+    "plain_domains": 0,
+    "invalid_lines": 0,
+    "added": 0,
+    "duplicates": 0
+}
 
 
 def normalize_domain(d: str) -> str:
@@ -27,7 +39,7 @@ def normalize_domain(d: str) -> str:
 
 def extract_domain_from_adblock_rule(rule: str) -> str:
     if rule.startswith("@@"):
-        return ""
+        return ""  # Whitelist rules should be skipped
     match = re.match(r"^\|\|([^\^/]+)", rule)
     return match.group(1) if match else ""
 
@@ -39,19 +51,11 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
         r.raise_for_status()
     except Exception as e:
         print(f"❌ Error fetching {url}: {e}")
-        return set(), {}
+        return set(), DEFAULT_STATS.copy()
 
     text = r.text
     domains = set()
-    stats = {
-        "total_lines": 0,
-        "adblock_rules": 0,
-        "hosts_rules": 0,
-        "plain_domains": 0,
-        "invalid_lines": 0,
-        "added": 0,
-        "duplicates": 0  # This won't be printed per-source
-    }
+    stats = DEFAULT_STATS.copy()
 
     for raw in text.splitlines():
         stats["total_lines"] += 1
@@ -61,6 +65,7 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
             continue
 
         token = None
+
         ab = extract_domain_from_adblock_rule(ln)
         if ab:
             token = ab
@@ -102,22 +107,14 @@ def main():
         urls = [line.strip() for line in f if line.strip() and not line.startswith(COMMENT_PREFIXES)]
 
     all_domains = set()
-    overall_stats = {
-        "sources": 0,
-        "total_domains": 0,
-        "adblock_rules": 0,
-        "hosts_rules": 0,
-        "plain_domains": 0,
-        "invalid_lines": 0,
-        "duplicates": 0,
-        "added": 0,
-        "parsed_total": 0
-    }
+    overall_stats = DEFAULT_STATS.copy()
+    overall_stats["sources"] = 0
+    overall_stats["parsed_total"] = 0
 
     for url in urls:
         domains, stats = load_domains_from_url(url, all_domains)
+
         overall_stats["sources"] += 1
-        overall_stats["total_domains"] += len(domains)
         overall_stats["parsed_total"] += stats["total_lines"]
 
         for k in stats:
@@ -136,8 +133,8 @@ def main():
         for d in sorted(all_domains):
             f.write(f"||{d}^\n")
 
-    # Final deduplication summary
-    deduped = overall_stats["parsed_total"] - len(all_domains)
+    deduped = overall_stats["parsed_total"] - overall_stats["added"]
+
     print("\n📈 Overall Summary:")
     print(f"  Sources read:     {overall_stats['sources']}")
     print(f"  Total lines:      {overall_stats['parsed_total']}")
