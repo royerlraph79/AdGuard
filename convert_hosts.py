@@ -27,8 +27,7 @@ DEFAULT_STATS = {
 def normalize_domain(d: str) -> str:
     d = d.strip().lower()
     d = re.sub(r"^https?://", "", d)
-    d = d.split("/")[0]
-    d = d.split(":")[0]
+    d = d.split("/")[0].split(":")[0]
     if d.startswith("*."):
         d = d[2:]
     d = d.rstrip(".^")
@@ -37,7 +36,7 @@ def normalize_domain(d: str) -> str:
 
 def extract_domain_from_adblock_rule(line: str) -> str:
     if line.startswith("@@"):
-        return ""  # skip whitelist rules
+        return ""
     m = re.match(r"^\|\|([^\^/]+)", line)
     return m.group(1) if m else ""
 
@@ -98,21 +97,28 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
     return domains, stats
 
 
+# 🚀 FAST subdomain deduplication (NO N²)
 def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
-    print("🧹 Removing redundant subdomains...")
+    print("🧹 Fast subdomain deduplication...")
     sys.stdout.flush()
 
-    final = set()
-    sorted_list = sorted(domains)
+    domain_set = set(domains)
+    result = set()
 
-    for domain in sorted_list:
-        if any(domain == base or domain.endswith("." + base) for base in final):
-            continue
-        final.add(domain)
+    for domain in domain_set:
+        parts = domain.split(".")
+        redundant = False
+        for i in range(1, len(parts)):
+            parent = ".".join(parts[i:])
+            if parent in domain_set:
+                redundant = True
+                break
+        if not redundant:
+            result.add(domain)
 
-    print("✅ Done removing subdomains.")
+    print("✅ Subdomain deduplication complete.")
     sys.stdout.flush()
-    return final
+    return result
 
 
 def main():
@@ -139,37 +145,27 @@ def main():
         for k in DEFAULT_STATS:
             overall[k] += stats[k]
 
-        print(f"📊 Stats for {url}")
-        print(f"  Total lines:   {stats['total_lines']}")
-        print(f"  Added:         {stats['added']}")
-        print(f"  Skipped:       {stats['skipped']}")
+        print(f"📊 {url}")
+        print(f"  Lines: {stats['total_lines']} | Added: {stats['added']} | Skipped: {stats['skipped']}")
         sys.stdout.flush()
 
-    print(f"🧠 Raw domains before dedup: {len(all_domains)}")
+    print(f"🧠 Raw domains: {len(all_domains)}")
     sys.stdout.flush()
 
     final_domains = remove_redundant_subdomains(all_domains)
 
-    print(f"🧠 Final deduplicated domains: {len(final_domains)}")
-    print(f"📦 Writing to {OUTPUT_FILE}...")
+    print(f"🧠 Final domains: {len(final_domains)}")
+    print(f"📦 Writing {OUTPUT_FILE}...")
     sys.stdout.flush()
 
     with open(OUTPUT_FILE, "w") as f:
         for i, d in enumerate(sorted(final_domains), 1):
-            clean = d.rstrip("^")
-            f.write(f"||{clean}^\n")
-            if i % 10000 == 0:
-                print(f"  ... wrote {i} domains")
+            f.write(f"||{d}^\n")
+            if i % 20000 == 0:
+                print(f"  ... wrote {i}")
                 sys.stdout.flush()
 
-    print("\n📈 Overall Summary")
-    print(f"  Sources:        {overall['sources']}")
-    print(f"  Lines parsed:   {overall['parsed_total']}")
-    print(f"  Unique domains: {len(final_domains)}")
-    print(f"  Added:          {overall['added']}")
-    print(f"  Duplicates:     {overall['duplicates']}")
-    print(f"  Skipped:        {overall['skipped']}")
-    print("🏁 Blocklist generation complete.")
+    print("🏁 Done.")
     sys.stdout.flush()
 
 
