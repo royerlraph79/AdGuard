@@ -2,9 +2,8 @@ import re
 import requests
 from typing import Set, Tuple, Dict
 
-# Match 0.0.0.0 domain style entries
 HOSTS_RE = re.compile(
-    r"^\s*(?P<ip>0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?P<domain>[^\s#]+)",
+    r"^\s*(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
     re.IGNORECASE
 )
 
@@ -18,72 +17,65 @@ DEFAULT_STATS = {
     "hosts_rules": 0,
     "plain_domains": 0,
     "invalid_lines": 0,
-    "added": 0,
     "duplicates": 0,
-    "skipped": 0
+    "added": 0,
+    "skipped": 0,
 }
 
 
 def normalize_domain(d: str) -> str:
     d = d.strip().lower()
-    if d.startswith("http://") or d.startswith("https://"):
-        d = re.sub(r"^https?://", "", d)
+    d = re.sub(r"^https?://", "", d)
     d = d.split("/")[0]
+    d = d.split(":")[0]
     if d.startswith("*."):
         d = d[2:]
-    d = d.split(":")[0]
-    if d.endswith("."):
-        d = d[:-1]
+    d = d.rstrip(".^")
     return d if "." in d else ""
 
 
-def extract_domain_from_adblock_rule(rule: str) -> str:
-    if rule.startswith("@@"):
-        return ""  # Whitelist rule
-    match = re.match(r"^\|\|([^\^/]+)", rule)
-    return match.group(1) if match else ""
+def extract_domain_from_adblock_rule(line: str) -> str:
+    if line.startswith("@@"):
+        return ""  # skip whitelist rules
+    m = re.match(r"^\|\|([^\^/]+)", line)
+    return m.group(1) if m else ""
 
 
 def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str, int]]:
     print(f"\n🔗 Fetching: {url}")
+    stats = DEFAULT_STATS.copy()
+    domains = set()
+
     try:
         r = requests.get(url, timeout=30)
         r.raise_for_status()
+        text = r.text
     except Exception as e:
         print(f"❌ Error fetching {url}: {e}")
-        return set(), DEFAULT_STATS.copy()
-
-    text = r.text
-    domains = set()
-    stats = DEFAULT_STATS.copy()
+        return domains, stats
 
     for raw in text.splitlines():
         stats["total_lines"] += 1
         ln = raw.strip()
+
         if not ln or ln.startswith(COMMENT_PREFIXES):
             stats["invalid_lines"] += 1
             continue
 
-        token = None
+        token = ""
 
-        ab = extract_domain_from_adblock_rule(ln)
-        if ab:
-            token = ab
+        ad = extract_domain_from_adblock_rule(ln)
+        if ad:
+            token = ad
             stats["adblock_rules"] += 1
         else:
-            m = HOSTS_RE.match(ln)
-            if m:
-                token = m.group("domain")
+            hm = HOSTS_RE.match(ln)
+            if hm:
+                token = hm.group(1)
                 stats["hosts_rules"] += 1
             else:
-                parts = ln.split()
-                if parts:
-                    token = parts[0]
-                    stats["plain_domains"] += 1
-
-        if not token:
-            stats["invalid_lines"] += 1
-            continue
+                token = ln.split()[0]
+                stats["plain_domains"] += 1
 
         domain = normalize_domain(token)
         if not domain:
@@ -104,81 +96,65 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
 
 def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
     """
-    Remove subdomains if the base domain is already present.
-    Example: keep 'appsflyersdk.com', drop '-attr.appsflyersdk.com'
+    Keep base domains and remove any domain that is a subdomain
+    of an already-kept base domain.
     """
-    final_domains = set()
+    kept = set()
 
-    # Prioritize root domains: fewer dots, then shorter names
-    sorted_domains = sorted(domains, key=lambda d: (d.count("."), len(d)))
-
-    for domain in sorted_domains:
-        parts = domain.split(".")
-        is_sub = False
-
-        # Check if any parent domain is already in final set
-        for i in range(1, len(parts) - 1):
-            parent = ".".join(parts[i:])
-            if parent in final_domains:
-                is_sub = True
+    # Shortest domains first → base domains win
+    for domain in sorted(domains, key=len):
+        redundant = False
+        for base in kept:
+            if domain == base or domain.endswith("." + base):
+                redundant = True
                 break
+        if not redundant:
+            kept.add(domain)
 
-        if not is_sub:
-            final_domains.add(domain)
-
-    return final_domains
+    return kept
 
 
 def main():
-    print("📄 Reading source URLs...")
     with open(SOURCE_FILE, "r") as f:
-        urls = [line.strip() for line in f if line.strip() and not line.startswith(COMMENT_PREFIXES)]
+        urls = [
+            l.strip()
+            for l in f
+            if l.strip() and not l.startswith(COMMENT_PREFIXES)
+        ]
 
     all_domains = set()
-    overall_stats = DEFAULT_STATS.copy()
-    overall_stats["sources"] = 0
-    overall_stats["parsed_total"] = 0
+    overall = DEFAULT_STATS.copy()
+    overall["sources"] = 0
+    overall["parsed_total"] = 0
 
     for url in urls:
         domains, stats = load_domains_from_url(url, all_domains)
+        overall["sources"] += 1
+        overall["parsed_total"] += stats["total_lines"]
 
-        overall_stats["sources"] += 1
-        overall_stats["parsed_total"] += stats["total_lines"]
-
-        for k in stats:
-            overall_stats[k] += stats[k]
+        for k in DEFAULT_STATS:
+            overall[k] += stats[k]
 
         print(f"📊 Stats for {url}")
-        print(f"  Total lines:     {stats['total_lines']}")
-        print(f"  Adblock rules:   {stats['adblock_rules']}")
-        print(f"  Hosts rules:     {stats['hosts_rules']}")
-        print(f"  Plain domains:   {stats['plain_domains']}")
-        print(f"  Invalid lines:   {stats['invalid_lines']}")
-        print(f"  Added domains:   {stats['added']}")
-        print(f"  Skipped rules:   {stats['skipped']}")
+        print(f"  Total lines:   {stats['total_lines']}")
+        print(f"  Added:         {stats['added']}")
+        print(f"  Skipped:       {stats['skipped']}")
 
-    # Deduplicate subdomains
+    # 🔥 THIS is where the real fix happens
     final_domains = remove_redundant_subdomains(all_domains)
 
-    print(f"\n✅ Writing {len(final_domains)} unique domains to: {OUTPUT_FILE}")
+    print(f"\n✅ Writing {len(final_domains)} rules to {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w") as f:
         for d in sorted(final_domains):
-            clean = d.rstrip("^")  # remove accidental trailing ^
-            f.write(f"||{clean}^\n")
+            f.write(f"||{d}^\n")
 
-    deduped = overall_stats["parsed_total"] - overall_stats["added"]
-
-    print("\n📈 Overall Summary:")
-    print(f"  Sources read:     {overall_stats['sources']}")
-    print(f"  Total lines:      {overall_stats['parsed_total']}")
-    print(f"  Unique domains:   {len(final_domains)}")
-    print(f"  Adblock parsed:   {overall_stats['adblock_rules']}")
-    print(f"  Hosts parsed:     {overall_stats['hosts_rules']}")
-    print(f"  Plain parsed:     {overall_stats['plain_domains']}")
-    print(f"  Invalid lines:    {overall_stats['invalid_lines']}")
-    print(f"  Duplicates found: {overall_stats['duplicates']}")
-    print(f"  Skipped rules:    {overall_stats['skipped']}")
-    print(f"  Deduplicated:     {deduped}")
+    print("\n📈 Overall Summary")
+    print(f"  Sources:        {overall['sources']}")
+    print(f"  Lines parsed:   {overall['parsed_total']}")
+    print(f"  Unique domains: {len(final_domains)}")
+    print(f"  Added:          {overall['added']}")
+    print(f"  Duplicates:     {overall['duplicates']}")
+    print(f"  Skipped:        {overall['skipped']}")
     print("\n🏁 Done!")
 
 
