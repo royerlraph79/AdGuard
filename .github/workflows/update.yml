@@ -3,7 +3,7 @@ name: Update Blocklist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"  # 🔁 Every 24 hours at midnight UTC
+    - cron: "0 0 * * *"  # 🕛 Every 24 hours
 
 jobs:
   update:
@@ -25,15 +25,17 @@ jobs:
 
     - name: ⚙️ Generate blocklist
       run: |
-        set -e
+        echo "📍 STARTING convert_hosts.py"
         python convert_hosts.py
+        echo "✅ FINISHED convert_hosts.py"
 
     - name: 👀 Preview output
       run: |
-        echo "== Preview (head -n 20) =="
+        echo "== Head of adguard_blocklist.txt =="
         head -n 20 adguard_blocklist.txt
         RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
         echo "Rule count: $RULES"
+        echo "### ✅ Rule count: $RULES" >> $GITHUB_STEP_SUMMARY
 
     - name: ✅ Check for changes
       id: git-check
