@@ -3,11 +3,12 @@ name: Update Blocklist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"  # 🕛 Every 24 hours
+    - cron: "0 0 * * *"  # Every 24 hours
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # ⛔ HARD STOP if anything hangs
 
     steps:
     - name: ⬇️ Checkout repository
@@ -31,20 +32,18 @@ jobs:
 
     - name: 👀 Preview output
       run: |
-        echo "== Head of adguard_blocklist.txt =="
+        echo "== Preview =="
         head -n 20 adguard_blocklist.txt
         RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
         echo "Rule count: $RULES"
-        echo "### ✅ Rule count: $RULES" >> $GITHUB_STEP_SUMMARY
+        echo "### Rule count: $RULES" >> $GITHUB_STEP_SUMMARY
 
     - name: ✅ Check for changes
       id: git-check
       run: |
         if git diff --quiet adguard_blocklist.txt; then
-          echo "No changes to commit."
           echo "changed=false" >> "$GITHUB_OUTPUT"
         else
-          echo "Changes detected in blocklist."
           echo "changed=true" >> "$GITHUB_OUTPUT"
         fi
 
