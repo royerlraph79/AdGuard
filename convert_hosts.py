@@ -2,7 +2,7 @@ import re
 import requests
 from typing import Set, Tuple, Dict
 
-# Match hosts-style entries
+# Match 0.0.0.0 domain style entries
 HOSTS_RE = re.compile(
     r"^\s*(?P<ip>0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?P<domain>[^\s#]+)",
     re.IGNORECASE
@@ -39,7 +39,7 @@ def normalize_domain(d: str) -> str:
 
 def extract_domain_from_adblock_rule(rule: str) -> str:
     if rule.startswith("@@"):
-        return ""  # Skip whitelists
+        return ""  # Whitelist rule
     match = re.match(r"^\|\|([^\^/]+)", rule)
     return match.group(1) if match else ""
 
@@ -103,17 +103,26 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
 
 
 def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
+    """
+    Remove subdomains if the base domain is already present.
+    Example: keep 'appsflyersdk.com', drop '-attr.appsflyersdk.com'
+    """
     final_domains = set()
-    sorted_domains = sorted(domains, key=lambda d: d.count("."))  # root domains first
+
+    # Prioritize root domains: fewer dots, then shorter names
+    sorted_domains = sorted(domains, key=lambda d: (d.count("."), len(d)))
 
     for domain in sorted_domains:
         parts = domain.split(".")
         is_sub = False
+
+        # Check if any parent domain is already in final set
         for i in range(1, len(parts) - 1):
             parent = ".".join(parts[i:])
             if parent in final_domains:
                 is_sub = True
                 break
+
         if not is_sub:
             final_domains.add(domain)
 
@@ -148,13 +157,14 @@ def main():
         print(f"  Added domains:   {stats['added']}")
         print(f"  Skipped rules:   {stats['skipped']}")
 
+    # Deduplicate subdomains
     final_domains = remove_redundant_subdomains(all_domains)
 
     print(f"\n✅ Writing {len(final_domains)} unique domains to: {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w") as f:
         for d in sorted(final_domains):
-            clean = d.rstrip("^")
-            f.write(f"||{clean}^\n")  # 💥 No more accidental ^^ endings!
+            clean = d.rstrip("^")  # remove accidental trailing ^
+            f.write(f"||{clean}^\n")
 
     deduped = overall_stats["parsed_total"] - overall_stats["added"]
 
