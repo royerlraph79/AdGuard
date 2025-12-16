@@ -1,4 +1,5 @@
 import re
+import sys
 import requests
 from typing import Set, Tuple, Dict
 
@@ -43,6 +44,8 @@ def extract_domain_from_adblock_rule(line: str) -> str:
 
 def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str, int]]:
     print(f"\n🔗 Fetching: {url}")
+    sys.stdout.flush()
+
     stats = DEFAULT_STATS.copy()
     domains = set()
 
@@ -52,6 +55,7 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
         text = r.text
     except Exception as e:
         print(f"❌ Error fetching {url}: {e}")
+        sys.stdout.flush()
         return domains, stats
 
     for raw in text.splitlines():
@@ -96,18 +100,25 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
 
 def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
     print("🧹 Removing redundant subdomains...")
+    sys.stdout.flush()
+
     final = set()
     sorted_list = sorted(domains)
+
     for domain in sorted_list:
         if any(domain == base or domain.endswith("." + base) for base in final):
             continue
         final.add(domain)
+
     print("✅ Done removing subdomains.")
+    sys.stdout.flush()
     return final
 
 
 def main():
     print("🚀 Starting blocklist generation...")
+    sys.stdout.flush()
+
     with open(SOURCE_FILE, "r") as f:
         urls = [
             l.strip()
@@ -132,14 +143,16 @@ def main():
         print(f"  Total lines:   {stats['total_lines']}")
         print(f"  Added:         {stats['added']}")
         print(f"  Skipped:       {stats['skipped']}")
+        sys.stdout.flush()
 
-    # Debug: domain count before deduplication
     print(f"🧠 Raw domains before dedup: {len(all_domains)}")
+    sys.stdout.flush()
 
     final_domains = remove_redundant_subdomains(all_domains)
 
     print(f"🧠 Final deduplicated domains: {len(final_domains)}")
     print(f"📦 Writing to {OUTPUT_FILE}...")
+    sys.stdout.flush()
 
     with open(OUTPUT_FILE, "w") as f:
         for i, d in enumerate(sorted(final_domains), 1):
@@ -147,6 +160,7 @@ def main():
             f.write(f"||{clean}^\n")
             if i % 10000 == 0:
                 print(f"  ... wrote {i} domains")
+                sys.stdout.flush()
 
     print("\n📈 Overall Summary")
     print(f"  Sources:        {overall['sources']}")
@@ -156,6 +170,7 @@ def main():
     print(f"  Duplicates:     {overall['duplicates']}")
     print(f"  Skipped:        {overall['skipped']}")
     print("🏁 Blocklist generation complete.")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":
