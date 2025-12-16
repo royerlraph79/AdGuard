@@ -2,7 +2,7 @@ import re
 import requests
 from typing import Set, Tuple, Dict
 
-# Match lines like: 0.0.0.0 domain.com
+# Match hosts-style lines like: 0.0.0.0 domain.com
 HOSTS_RE = re.compile(
     r"^\s*(?P<ip>0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?P<domain>[^\s#]+)",
     re.IGNORECASE
@@ -12,7 +12,6 @@ COMMENT_PREFIXES = ("#", "!", "//", ";")
 SOURCE_FILE = "sources.txt"
 OUTPUT_FILE = "adguard_blocklist.txt"
 
-# Default stat structure for each source
 DEFAULT_STATS = {
     "total_lines": 0,
     "adblock_rules": 0,
@@ -39,7 +38,7 @@ def normalize_domain(d: str) -> str:
 
 def extract_domain_from_adblock_rule(rule: str) -> str:
     if rule.startswith("@@"):
-        return ""  # Whitelist rules should be skipped
+        return ""  # Whitelist rule
     match = re.match(r"^\|\|([^\^/]+)", rule)
     return match.group(1) if match else ""
 
@@ -101,6 +100,30 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
     return domains, stats
 
 
+def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
+    """
+    If a base domain like example.com exists, remove subdomains like ads.example.com.
+    """
+    final_domains = set()
+    sorted_domains = sorted(domains, key=lambda d: d.count("."))  # base domains first
+
+    for domain in sorted_domains:
+        parts = domain.split(".")
+        is_sub = False
+
+        # Check if any parent is already added
+        for i in range(1, len(parts) - 1):  # avoid top-level domains only
+            parent = ".".join(parts[i:])
+            if parent in final_domains:
+                is_sub = True
+                break
+
+        if not is_sub:
+            final_domains.add(domain)
+
+    return final_domains
+
+
 def main():
     print("📄 Reading source URLs...")
     with open(SOURCE_FILE, "r") as f:
@@ -128,9 +151,12 @@ def main():
         print(f"  Invalid lines:   {stats['invalid_lines']}")
         print(f"  Added domains:   {stats['added']}")
 
-    print(f"\n✅ Writing combined list to: {OUTPUT_FILE}")
+    # Subdomain deduplication 🔥
+    final_domains = remove_redundant_subdomains(all_domains)
+
+    print(f"\n✅ Writing {len(final_domains)} unique domains to: {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w") as f:
-        for d in sorted(all_domains):
+        for d in sorted(final_domains):
             f.write(f"||{d}^\n")
 
     deduped = overall_stats["parsed_total"] - overall_stats["added"]
@@ -138,7 +164,7 @@ def main():
     print("\n📈 Overall Summary:")
     print(f"  Sources read:     {overall_stats['sources']}")
     print(f"  Total lines:      {overall_stats['parsed_total']}")
-    print(f"  Unique domains:   {len(all_domains)}")
+    print(f"  Unique domains:   {len(final_domains)}")
     print(f"  Adblock parsed:   {overall_stats['adblock_rules']}")
     print(f"  Hosts parsed:     {overall_stats['hosts_rules']}")
     print(f"  Plain parsed:     {overall_stats['plain_domains']}")
