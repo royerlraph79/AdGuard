@@ -95,19 +95,19 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
 
 
 def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
-    """
-    Keep base domains and remove any domain that is a subdomain
-    of an already-kept base domain.
-    """
+    print("🧹 Removing redundant subdomains...")
     final = set()
-    for domain in sorted(domains):  # alphabetical sort = stable output
+    sorted_list = sorted(domains)
+    for domain in sorted_list:
         if any(domain == base or domain.endswith("." + base) for base in final):
             continue
         final.add(domain)
+    print("✅ Done removing subdomains.")
     return final
 
 
 def main():
+    print("🚀 Starting blocklist generation...")
     with open(SOURCE_FILE, "r") as f:
         urls = [
             l.strip()
@@ -133,13 +133,20 @@ def main():
         print(f"  Added:         {stats['added']}")
         print(f"  Skipped:       {stats['skipped']}")
 
+    # Debug: domain count before deduplication
+    print(f"🧠 Raw domains before dedup: {len(all_domains)}")
+
     final_domains = remove_redundant_subdomains(all_domains)
 
-    print(f"\n✅ Writing {len(final_domains)} rules to {OUTPUT_FILE}")
+    print(f"🧠 Final deduplicated domains: {len(final_domains)}")
+    print(f"📦 Writing to {OUTPUT_FILE}...")
+
     with open(OUTPUT_FILE, "w") as f:
-        for d in sorted(final_domains):
+        for i, d in enumerate(sorted(final_domains), 1):
             clean = d.rstrip("^")
             f.write(f"||{clean}^\n")
+            if i % 10000 == 0:
+                print(f"  ... wrote {i} domains")
 
     print("\n📈 Overall Summary")
     print(f"  Sources:        {overall['sources']}")
@@ -148,7 +155,7 @@ def main():
     print(f"  Added:          {overall['added']}")
     print(f"  Duplicates:     {overall['duplicates']}")
     print(f"  Skipped:        {overall['skipped']}")
-    print("\n🏁 Done!")
+    print("🏁 Blocklist generation complete.")
 
 
 if __name__ == "__main__":
