@@ -1,60 +1,56 @@
-name: Update AdGuard Blocklist (main branch)
+name: Update Blocklist
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
-    - cron: "17 3 * * *"  # daily @ 03:17 UTC
-
-permissions:
-  contents: write
+    - cron: "0 0 * * *"  # 🔁 Every 24 hours at midnight UTC
 
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
+    - name: ⬇️ Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    - name: 🐍 Set up Python 3.14.2
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.14.2'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    - name: 📦 Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-      - name: Generate blocklist
-        env:
-          OUTPUT_FILE: adguard_blocklist.txt
-          SOURCES_FILE: sources.txt
-          ALLOWLIST_FILE: allowlist.txt
-          EXTRAS_BLOCK_FILE: extras_block.txt
-          ENABLE_SUBSUMPTION: "1"
-        run: |
-          set -e
-          python convert_hosts.py
-          echo "== Preview (head -n 20) =="
-          head -n 20 adguard_blocklist.txt
-          RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
-          echo "Rule count: $RULES"
+    - name: ⚙️ Generate blocklist
+      run: |
+        set -e
+        python convert_hosts.py
 
-      - name: Commit if changed
-        shell: bash
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l | awk '{print $1}')
-          TS=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          if [[ -n "$(git status --porcelain adguard_blocklist.txt)" ]]; then
-            git add adguard_blocklist.txt
-            git commit -m "update blocklist (rules: ${RULES}) (${TS})"
-            git push origin main
-          else
-            echo "No changes to commit."
-          fi
+    - name: 👀 Preview output
+      run: |
+        echo "== Preview (head -n 20) =="
+        head -n 20 adguard_blocklist.txt
+        RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
+        echo "Rule count: $RULES"
+
+    - name: ✅ Check for changes
+      id: git-check
+      run: |
+        if git diff --quiet adguard_blocklist.txt; then
+          echo "No changes to commit."
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "Changes detected in blocklist."
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: 📤 Commit and push changes
+      if: steps.git-check.outputs.changed == 'true'
+      run: |
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+        git add adguard_blocklist.txt
+        git commit -m "🔄 Auto-update blocklist [skip ci]"
+        git push
