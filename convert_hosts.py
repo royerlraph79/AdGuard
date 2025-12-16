@@ -99,19 +99,12 @@ def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
     Keep base domains and remove any domain that is a subdomain
     of an already-kept base domain.
     """
-    kept = set()
-
-    # Shortest domains first → base domains win
-    for domain in sorted(domains, key=len):
-        redundant = False
-        for base in kept:
-            if domain == base or domain.endswith("." + base):
-                redundant = True
-                break
-        if not redundant:
-            kept.add(domain)
-
-    return kept
+    final = set()
+    for domain in sorted(domains):  # alphabetical sort = stable output
+        if any(domain == base or domain.endswith("." + base) for base in final):
+            continue
+        final.add(domain)
+    return final
 
 
 def main():
@@ -140,13 +133,13 @@ def main():
         print(f"  Added:         {stats['added']}")
         print(f"  Skipped:       {stats['skipped']}")
 
-    # 🔥 THIS is where the real fix happens
     final_domains = remove_redundant_subdomains(all_domains)
 
     print(f"\n✅ Writing {len(final_domains)} rules to {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w") as f:
         for d in sorted(final_domains):
-            f.write(f"||{d}^\n")
+            clean = d.rstrip("^")
+            f.write(f"||{clean}^\n")
 
     print("\n📈 Overall Summary")
     print(f"  Sources:        {overall['sources']}")
