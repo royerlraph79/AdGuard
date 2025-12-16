@@ -2,7 +2,7 @@ import re
 import requests
 from typing import Set, Tuple, Dict
 
-# Match 0.0.0.0 domain style entries
+# Match hosts-style entries
 HOSTS_RE = re.compile(
     r"^\s*(?P<ip>0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?P<domain>[^\s#]+)",
     re.IGNORECASE
@@ -20,7 +20,7 @@ DEFAULT_STATS = {
     "invalid_lines": 0,
     "added": 0,
     "duplicates": 0,
-    "skipped": 0  # NEW
+    "skipped": 0
 }
 
 
@@ -39,7 +39,7 @@ def normalize_domain(d: str) -> str:
 
 def extract_domain_from_adblock_rule(rule: str) -> str:
     if rule.startswith("@@"):
-        return ""  # Whitelist rule
+        return ""  # Skip whitelists
     match = re.match(r"^\|\|([^\^/]+)", rule)
     return match.group(1) if match else ""
 
@@ -98,25 +98,22 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
         domains.add(domain)
         stats["added"] += 1
 
-    # Compute skipped count
     stats["skipped"] = stats["invalid_lines"] + stats["duplicates"]
     return domains, stats
 
 
 def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
     final_domains = set()
-    sorted_domains = sorted(domains, key=lambda d: d.count("."))  # shallowest first
+    sorted_domains = sorted(domains, key=lambda d: d.count("."))  # root domains first
 
     for domain in sorted_domains:
         parts = domain.split(".")
         is_sub = False
-
         for i in range(1, len(parts) - 1):
             parent = ".".join(parts[i:])
             if parent in final_domains:
                 is_sub = True
                 break
-
         if not is_sub:
             final_domains.add(domain)
 
@@ -156,7 +153,8 @@ def main():
     print(f"\n✅ Writing {len(final_domains)} unique domains to: {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w") as f:
         for d in sorted(final_domains):
-            f.write(f"||{d}^\n")
+            clean = d.rstrip("^")
+            f.write(f"||{clean}^\n")  # 💥 No more accidental ^^ endings!
 
     deduped = overall_stats["parsed_total"] - overall_stats["added"]
 
