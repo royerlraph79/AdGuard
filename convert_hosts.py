@@ -2,7 +2,7 @@ import re
 import requests
 from typing import Set, Tuple, Dict
 
-# Match hosts-style lines like: 0.0.0.0 domain.com
+# Match 0.0.0.0 domain style entries
 HOSTS_RE = re.compile(
     r"^\s*(?P<ip>0\.0\.0\.0|127\.0\.0\.1|::1)\s+(?P<domain>[^\s#]+)",
     re.IGNORECASE
@@ -19,7 +19,8 @@ DEFAULT_STATS = {
     "plain_domains": 0,
     "invalid_lines": 0,
     "added": 0,
-    "duplicates": 0
+    "duplicates": 0,
+    "skipped": 0  # NEW
 }
 
 
@@ -97,22 +98,20 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
         domains.add(domain)
         stats["added"] += 1
 
+    # Compute skipped count
+    stats["skipped"] = stats["invalid_lines"] + stats["duplicates"]
     return domains, stats
 
 
 def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
-    """
-    If a base domain like example.com exists, remove subdomains like ads.example.com.
-    """
     final_domains = set()
-    sorted_domains = sorted(domains, key=lambda d: d.count("."))  # base domains first
+    sorted_domains = sorted(domains, key=lambda d: d.count("."))  # shallowest first
 
     for domain in sorted_domains:
         parts = domain.split(".")
         is_sub = False
 
-        # Check if any parent is already added
-        for i in range(1, len(parts) - 1):  # avoid top-level domains only
+        for i in range(1, len(parts) - 1):
             parent = ".".join(parts[i:])
             if parent in final_domains:
                 is_sub = True
@@ -150,8 +149,8 @@ def main():
         print(f"  Plain domains:   {stats['plain_domains']}")
         print(f"  Invalid lines:   {stats['invalid_lines']}")
         print(f"  Added domains:   {stats['added']}")
+        print(f"  Skipped rules:   {stats['skipped']}")
 
-    # Subdomain deduplication 🔥
     final_domains = remove_redundant_subdomains(all_domains)
 
     print(f"\n✅ Writing {len(final_domains)} unique domains to: {OUTPUT_FILE}")
@@ -170,6 +169,7 @@ def main():
     print(f"  Plain parsed:     {overall_stats['plain_domains']}")
     print(f"  Invalid lines:    {overall_stats['invalid_lines']}")
     print(f"  Duplicates found: {overall_stats['duplicates']}")
+    print(f"  Skipped rules:    {overall_stats['skipped']}")
     print(f"  Deduplicated:     {deduped}")
     print("\n🏁 Done!")
 
