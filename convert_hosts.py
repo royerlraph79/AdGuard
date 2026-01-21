@@ -117,11 +117,10 @@ def choose_token(raw_line: str) -> Tuple[str, str]:
 def glob_to_regex(glob: str) -> re.Pattern:
     """
     Convert a hostname glob with '*' into a safe regex matcher for full hostnames.
-    IMPORTANT: no backslash escapes like '\-' so we avoid SyntaxWarning.
+    IMPORTANT: avoid backslash escapes like \\- so we avoid SyntaxWarning.
     """
-    # Escape everything, then unescape the escaped '*' into a hostname-ish wildcard
     esc = re.escape(glob.lower())
-    esc = esc.replace(r"\*", r"[a-z0-9.-]*")  # NO backslashes -> no SyntaxWarning
+    esc = esc.replace(r"\*", r"[a-z0-9.-]*")  # no backslashes needed
     return re.compile(rf"^{esc}$", re.IGNORECASE)
 
 def remove_plain_redundant_subdomains(plain: Set[str]) -> Set[str]:
@@ -301,7 +300,10 @@ def main():
             overall[k] += stats[k]
 
         print(f"📊 {url}")
-        print(f"  Lines: {stats['total_lines']} | Added: {stats['added']} | Skipped: {stats['skipped']} | Duplicates: {stats['duplicates']} | Invalid: {stats['invalid_lines']}")
+        print(
+            f"  Lines: {stats['total_lines']} | Added: {stats['added']} | "
+            f"Skipped: {stats['skipped']} | Duplicates: {stats['duplicates']} | Invalid: {stats['invalid_lines']}"
+        )
         sys.stdout.flush()
 
     print(f"\n🧠 Raw unique entries: {len(all_domains)}")
