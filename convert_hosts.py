@@ -1,16 +1,32 @@
 import re
 import sys
 import requests
-from typing import Set, Tuple, Dict
+from typing import Set, Tuple, Dict, List
+from dataclasses import dataclass
+
+# ---------------------------
+# Config
+# ---------------------------
+
+SOURCE_FILE = "sources.txt"
+OUTPUT_FILE = "adguard_blocklist.txt"
+
+# Optional toggles
+DEDUP_SUBDOMAINS = True                 # remove foo.bar.com if bar.com exists
+DEDUP_PLAIN_COVERED_BY_WILDCARDS = True # remove plain domains matched by wildcard patterns
+DEDUP_WILDCARDS_CONSERVATIVE = False    # optional + conservative wildcard-vs-wildcard pruning
+
+COMMENT_PREFIXES = ("#", "!", "//", ";")
 
 HOSTS_RE = re.compile(
     r"^\s*(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
     re.IGNORECASE
 )
 
-COMMENT_PREFIXES = ("#", "!", "//", ";")
-SOURCE_FILE = "sources.txt"
-OUTPUT_FILE = "adguard_blocklist.txt"
+# Fast-ish helpers
+SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
+LEADING_ADBLOCK_MARKERS_RE = re.compile(r"^(?:@@\|\||\|\|)", re.IGNORECASE)
+TRAILING_OPTIONS_RE = re.compile(r"\$.*$", re.IGNORECASE)  # strip $options
 
 DEFAULT_STATS = {
     "total_lines": 0,
@@ -23,30 +39,228 @@ DEFAULT_STATS = {
     "skipped": 0,
 }
 
+# ---------------------------
+# Parsing + normalization
+# ---------------------------
 
-def normalize_domain(d: str) -> str:
-    d = d.strip().lower()
-    d = re.sub(r"^https?://", "", d)
-    d = d.split("/")[0].split(":")[0]
+def is_comment_or_empty(line: str) -> bool:
+    ln = line.strip()
+    return (not ln) or ln.startswith(COMMENT_PREFIXES)
+
+def normalize_token(token: str) -> str:
+    """
+    Normalize a hostname-like token or AdGuard pattern for host rules.
+
+    Keeps '*' (wildcards) intact.
+    Returns "" if it doesn't look like a domain/pattern we should keep.
+    """
+    d = token.strip().lower()
+    if not d:
+        return ""
+
+    # Remove scheme + path/query/fragment
+    d = SCHEME_RE.sub("", d)
+    d = d.split("/")[0]
+    d = d.split("?")[0]
+    d = d.split("#")[0]
+
+    # Remove port if present
+    # (ignore IPv6/edge cases; this is for hostnames)
+    if ":" in d and not d.endswith("]"):
+        d = d.split(":")[0]
+
+    # Strip leading adblock markers if someone pasted them as "token"
+    d = LEADING_ADBLOCK_MARKERS_RE.sub("", d)
+
+    # Strip leading "*." (common for host wildcards)
     if d.startswith("*."):
         d = d[2:]
+
+    # Drop trailing separators used by rules
     d = d.rstrip(".^")
-    return d if "." in d else ""
 
-
-def extract_domain_from_adblock_rule(line: str) -> str:
-    if line.startswith("@@"):
+    # Basic sanity: must contain a dot OR contain a wildcard + dot
+    if "." not in d:
         return ""
-    m = re.match(r"^\|\|([^\^/]+)", line)
+
+    # Reject weird whitespace leftovers
+    if any(ch.isspace() for ch in d):
+        return ""
+
+    return d
+
+def extract_from_adblock_rule(line: str) -> str:
+    """
+    Extract the host-pattern from AdGuard/uBO-style host rules.
+    Examples:
+      ||example.com^$important  -> example.com
+      ||device-metrics-*.amazon.com^ -> device-metrics-*.amazon.com
+      @@||example.com^          -> "" (whitelist ignored)
+    """
+    ln = line.strip()
+
+    # Ignore allowlist rules
+    if ln.startswith("@@"):
+        return ""
+
+    # Strip options early, then parse
+    ln = TRAILING_OPTIONS_RE.sub("", ln)
+
+    # Host rule form: ||<host>(^ or / or end)
+    m = re.match(r"^\|\|([^\^/]+)", ln)
     return m.group(1) if m else ""
 
+def choose_token(raw_line: str) -> Tuple[str, str]:
+    """
+    Return (kind, token) where kind in {"adblock","hosts","plain","invalid"}.
+    """
+    ln = raw_line.strip()
+
+    ad = extract_from_adblock_rule(ln)
+    if ad:
+        return ("adblock", ad)
+
+    hm = HOSTS_RE.match(ln)
+    if hm:
+        return ("hosts", hm.group(1))
+
+    # Plain domain-ish line (first token)
+    token = ln.split()[0] if ln else ""
+    return ("plain", token)
+
+# ---------------------------
+# Dedup logic
+# ---------------------------
+
+def glob_to_regex(glob: str) -> re.Pattern:
+    """
+    Convert a hostname glob (with *) into a regex matcher for full hostnames.
+    Example: device-metrics-*.amazon.com -> ^device\-metrics\-[a-z0-9\-\.]*\.amazon\.com$
+    """
+    esc = re.escape(glob.lower())
+    esc = esc.replace(r"\*", r"[a-z0-9\-.]*")
+    return re.compile(rf"^{esc}$", re.IGNORECASE)
+
+def remove_plain_redundant_subdomains(plain: Set[str]) -> Set[str]:
+    """
+    Remove foo.bar.com if bar.com exists in the plain set.
+    """
+    kept = set()
+    for d in plain:
+        parts = d.split(".")
+        redundant = False
+        for i in range(1, len(parts)):
+            parent = ".".join(parts[i:])
+            if parent in plain:
+                redundant = True
+                break
+        if not redundant:
+            kept.add(d)
+    return kept
+
+def remove_plain_covered_by_wildcards(plain: Set[str], wildcards: Set[str]) -> Set[str]:
+    """
+    Remove plain domains that match any wildcard pattern already present.
+    """
+    if not wildcards:
+        return plain
+
+    wildcard_res = [glob_to_regex(w) for w in wildcards]
+    out = set()
+    for d in plain:
+        covered = False
+        for rx in wildcard_res:
+            if rx.match(d):
+                covered = True
+                break
+        if not covered:
+            out.add(d)
+    return out
+
+def conservative_wildcard_prune(wildcards: Set[str]) -> Set[str]:
+    """
+    Optional + conservative wildcard pruning.
+
+    ONLY prunes when the pattern is clearly redundant:
+      1) If you have "*.example.com", then remove "foo*.example.com", "bar-*.example.com", etc
+         (because "*.example.com" matches all subdomains).
+    This avoids risky 'glob contains glob' logic.
+
+    NOTE: This does NOT attempt to prove device-metrics-*.amazon.com covers device-metrics-us*.amazon.com,
+    because doing that safely for arbitrary globs is trickier than it looks.
+    """
+    if not wildcards:
+        return wildcards
+
+    star_subdomain = {w for w in wildcards if w.startswith("*.") or w.startswith("*.")}
+
+    # Normalize "*.example.com" to "example.com" base
+    bases = set()
+    for w in star_subdomain:
+        ww = w[2:] if w.startswith("*.") else w[2:]
+        bases.add(ww.lower())
+
+    if not bases:
+        return wildcards
+
+    pruned = set()
+    for w in wildcards:
+        wl = w.lower()
+        # If there's a "*.base" that would cover w, and w is more specific than subdomain wildcard, drop w
+        # Example: "*.amazon.com" covers "device-metrics-*.amazon.com"
+        redundant = False
+        for base in bases:
+            if wl.endswith("." + base) and wl != "*." + base and wl != "*." + base:
+                # ensure it is indeed a subdomain-pattern under base (has at least one dot before base)
+                left = wl[: -(len(base) + 1)]
+                if left and left.endswith("."):
+                    redundant = True
+                    break
+        if not redundant:
+            pruned.add(w)
+    return pruned
+
+def dedupe_domains(domains: Set[str]) -> Set[str]:
+    """
+    Full dedupe pipeline:
+      - split wildcards vs plain
+      - plain: remove redundant subdomains (bar.com makes foo.bar.com redundant)
+      - plain: remove entries matched by wildcard patterns (device-metrics-*.amazon.com covers device-metrics-us.amazon.com)
+      - optional conservative wildcard pruning
+    """
+    print("🧹 Deduplicating domains (subdomains + wildcards)...")
+    sys.stdout.flush()
+
+    domain_set = set(domains)
+
+    wildcards = {d for d in domain_set if "*" in d}
+    plain = {d for d in domain_set if "*" not in d}
+
+    if DEDUP_SUBDOMAINS:
+        plain = remove_plain_redundant_subdomains(plain)
+
+    if DEDUP_PLAIN_COVERED_BY_WILDCARDS and wildcards:
+        plain = remove_plain_covered_by_wildcards(plain, wildcards)
+
+    if DEDUP_WILDCARDS_CONSERVATIVE and wildcards:
+        wildcards = conservative_wildcard_prune(wildcards)
+
+    result = plain | wildcards
+
+    print("✅ Deduplication complete.")
+    sys.stdout.flush()
+    return result
+
+# ---------------------------
+# Fetch + aggregate
+# ---------------------------
 
 def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str, int]]:
     print(f"\n🔗 Fetching: {url}")
     sys.stdout.flush()
 
     stats = DEFAULT_STATS.copy()
-    domains = set()
+    found: Set[str] = set()
 
     try:
         r = requests.get(url, timeout=30)
@@ -55,32 +269,25 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
     except Exception as e:
         print(f"❌ Error fetching {url}: {e}")
         sys.stdout.flush()
-        return domains, stats
+        return found, stats
 
     for raw in text.splitlines():
         stats["total_lines"] += 1
         ln = raw.strip()
 
-        if not ln or ln.startswith(COMMENT_PREFIXES):
+        if is_comment_or_empty(ln):
             stats["invalid_lines"] += 1
             continue
 
-        token = ""
-
-        ad = extract_domain_from_adblock_rule(ln)
-        if ad:
-            token = ad
+        kind, token = choose_token(ln)
+        if kind == "adblock":
             stats["adblock_rules"] += 1
-        else:
-            hm = HOSTS_RE.match(ln)
-            if hm:
-                token = hm.group(1)
-                stats["hosts_rules"] += 1
-            else:
-                token = ln.split()[0]
-                stats["plain_domains"] += 1
+        elif kind == "hosts":
+            stats["hosts_rules"] += 1
+        elif kind == "plain":
+            stats["plain_domains"] += 1
 
-        domain = normalize_domain(token)
+        domain = normalize_token(token)
         if not domain:
             stats["invalid_lines"] += 1
             continue
@@ -90,49 +297,25 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
             continue
 
         seen.add(domain)
-        domains.add(domain)
+        found.add(domain)
         stats["added"] += 1
 
     stats["skipped"] = stats["invalid_lines"] + stats["duplicates"]
-    return domains, stats
+    return found, stats
 
-
-# 🚀 FAST subdomain deduplication (NO N²)
-def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
-    print("🧹 Fast subdomain deduplication...")
-    sys.stdout.flush()
-
-    domain_set = set(domains)
-    result = set()
-
-    for domain in domain_set:
-        parts = domain.split(".")
-        redundant = False
-        for i in range(1, len(parts)):
-            parent = ".".join(parts[i:])
-            if parent in domain_set:
-                redundant = True
-                break
-        if not redundant:
-            result.add(domain)
-
-    print("✅ Subdomain deduplication complete.")
-    sys.stdout.flush()
-    return result
-
+# ---------------------------
+# Main
+# ---------------------------
 
 def main():
     print("🚀 Starting blocklist generation...")
     sys.stdout.flush()
 
-    with open(SOURCE_FILE, "r") as f:
-        urls = [
-            l.strip()
-            for l in f
-            if l.strip() and not l.startswith(COMMENT_PREFIXES)
-        ]
+    with open(SOURCE_FILE, "r", encoding="utf-8") as f:
+        urls = [l.strip() for l in f if not is_comment_or_empty(l)]
 
-    all_domains = set()
+    all_domains: Set[str] = set()
+
     overall = DEFAULT_STATS.copy()
     overall["sources"] = 0
     overall["parsed_total"] = 0
@@ -146,19 +329,19 @@ def main():
             overall[k] += stats[k]
 
         print(f"📊 {url}")
-        print(f"  Lines: {stats['total_lines']} | Added: {stats['added']} | Skipped: {stats['skipped']}")
+        print(f"  Lines: {stats['total_lines']} | Added: {stats['added']} | Skipped: {stats['skipped']} | Duplicates: {stats['duplicates']} | Invalid: {stats['invalid_lines']}")
         sys.stdout.flush()
 
-    print(f"🧠 Raw domains: {len(all_domains)}")
+    print(f"\n🧠 Raw unique entries: {len(all_domains)}")
     sys.stdout.flush()
 
-    final_domains = remove_redundant_subdomains(all_domains)
+    final_domains = dedupe_domains(all_domains)
 
-    print(f"🧠 Final domains: {len(final_domains)}")
-    print(f"📦 Writing {OUTPUT_FILE}...")
+    print(f"🧠 Final entries: {len(final_domains)}")
+    print(f"📦 Writing: {OUTPUT_FILE}")
     sys.stdout.flush()
 
-    with open(OUTPUT_FILE, "w") as f:
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for i, d in enumerate(sorted(final_domains), 1):
             f.write(f"||{d}^\n")
             if i % 20000 == 0:
