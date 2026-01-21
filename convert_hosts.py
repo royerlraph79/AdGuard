@@ -1,8 +1,7 @@
 import re
 import sys
 import requests
-from typing import Set, Tuple, Dict, List
-from dataclasses import dataclass
+from typing import Set, Tuple, Dict
 
 # ---------------------------
 # Config
@@ -14,7 +13,7 @@ OUTPUT_FILE = "adguard_blocklist.txt"
 # Optional toggles
 DEDUP_SUBDOMAINS = True                 # remove foo.bar.com if bar.com exists
 DEDUP_PLAIN_COVERED_BY_WILDCARDS = True # remove plain domains matched by wildcard patterns
-DEDUP_WILDCARDS_CONSERVATIVE = False    # optional + conservative wildcard-vs-wildcard pruning
+DEDUP_WILDCARDS_CONSERVATIVE = False    # optional conservative wildcard-vs-wildcard pruning
 
 COMMENT_PREFIXES = ("#", "!", "//", ";")
 
@@ -23,10 +22,8 @@ HOSTS_RE = re.compile(
     re.IGNORECASE
 )
 
-# Fast-ish helpers
 SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
-LEADING_ADBLOCK_MARKERS_RE = re.compile(r"^(?:@@\|\||\|\|)", re.IGNORECASE)
-TRAILING_OPTIONS_RE = re.compile(r"\$.*$", re.IGNORECASE)  # strip $options
+TRAILING_OPTIONS_RE = re.compile(r"\$.*$")  # strip $options (cosmetic, etc.)
 
 DEFAULT_STATS = {
     "total_lines": 0,
@@ -49,10 +46,9 @@ def is_comment_or_empty(line: str) -> bool:
 
 def normalize_token(token: str) -> str:
     """
-    Normalize a hostname-like token or AdGuard pattern for host rules.
-
-    Keeps '*' (wildcards) intact.
-    Returns "" if it doesn't look like a domain/pattern we should keep.
+    Normalize a hostname-like token or AdGuard host-pattern.
+    Keeps '*' intact.
+    Returns "" if it doesn't look like a domain/pattern.
     """
     d = token.strip().lower()
     if not d:
@@ -60,30 +56,22 @@ def normalize_token(token: str) -> str:
 
     # Remove scheme + path/query/fragment
     d = SCHEME_RE.sub("", d)
-    d = d.split("/")[0]
-    d = d.split("?")[0]
-    d = d.split("#")[0]
+    d = d.split("/")[0].split("?")[0].split("#")[0]
 
-    # Remove port if present
-    # (ignore IPv6/edge cases; this is for hostnames)
-    if ":" in d and not d.endswith("]"):
+    # Remove port
+    if ":" in d:
         d = d.split(":")[0]
 
-    # Strip leading adblock markers if someone pasted them as "token"
-    d = LEADING_ADBLOCK_MARKERS_RE.sub("", d)
-
-    # Strip leading "*." (common for host wildcards)
+    # Strip leading "*."
     if d.startswith("*."):
         d = d[2:]
 
-    # Drop trailing separators used by rules
+    # Strip trailing delimiters often found in pasted rules
     d = d.rstrip(".^")
 
-    # Basic sanity: must contain a dot OR contain a wildcard + dot
+    # Basic sanity
     if "." not in d:
         return ""
-
-    # Reject weird whitespace leftovers
     if any(ch.isspace() for ch in d):
         return ""
 
@@ -91,28 +79,23 @@ def normalize_token(token: str) -> str:
 
 def extract_from_adblock_rule(line: str) -> str:
     """
-    Extract the host-pattern from AdGuard/uBO-style host rules.
-    Examples:
-      ||example.com^$important  -> example.com
+    Extract host-pattern from AdGuard/uBO host rules.
+      ||example.com^$important -> example.com
       ||device-metrics-*.amazon.com^ -> device-metrics-*.amazon.com
-      @@||example.com^          -> "" (whitelist ignored)
+      @@||example.com^ -> "" (ignore allowlist)
     """
     ln = line.strip()
-
-    # Ignore allowlist rules
     if ln.startswith("@@"):
         return ""
 
-    # Strip options early, then parse
     ln = TRAILING_OPTIONS_RE.sub("", ln)
 
-    # Host rule form: ||<host>(^ or / or end)
     m = re.match(r"^\|\|([^\^/]+)", ln)
     return m.group(1) if m else ""
 
 def choose_token(raw_line: str) -> Tuple[str, str]:
     """
-    Return (kind, token) where kind in {"adblock","hosts","plain","invalid"}.
+    Return (kind, token) where kind in {"adblock","hosts","plain"}.
     """
     ln = raw_line.strip()
 
@@ -124,21 +107,21 @@ def choose_token(raw_line: str) -> Tuple[str, str]:
     if hm:
         return ("hosts", hm.group(1))
 
-    # Plain domain-ish line (first token)
     token = ln.split()[0] if ln else ""
     return ("plain", token)
 
 # ---------------------------
-# Dedup logic
+# Wildcard + subdomain dedupe
 # ---------------------------
 
 def glob_to_regex(glob: str) -> re.Pattern:
     """
-    Convert a hostname glob (with *) into a regex matcher for full hostnames.
-    Example: device-metrics-*.amazon.com -> ^device\-metrics\-[a-z0-9\-\.]*\.amazon\.com$
+    Convert a hostname glob with '*' into a safe regex matcher for full hostnames.
+    IMPORTANT: no backslash escapes like '\-' so we avoid SyntaxWarning.
     """
+    # Escape everything, then unescape the escaped '*' into a hostname-ish wildcard
     esc = re.escape(glob.lower())
-    esc = esc.replace(r"\*", r"[a-z0-9\-.]*")
+    esc = esc.replace(r"\*", r"[a-z0-9.-]*")  # NO backslashes -> no SyntaxWarning
     return re.compile(rf"^{esc}$", re.IGNORECASE)
 
 def remove_plain_redundant_subdomains(plain: Set[str]) -> Set[str]:
@@ -161,12 +144,14 @@ def remove_plain_redundant_subdomains(plain: Set[str]) -> Set[str]:
 def remove_plain_covered_by_wildcards(plain: Set[str], wildcards: Set[str]) -> Set[str]:
     """
     Remove plain domains that match any wildcard pattern already present.
+    Example: device-metrics-*.amazon.com covers device-metrics-us.amazon.com
     """
     if not wildcards:
         return plain
 
     wildcard_res = [glob_to_regex(w) for w in wildcards]
     out = set()
+
     for d in plain:
         covered = False
         for rx in wildcard_res:
@@ -175,74 +160,57 @@ def remove_plain_covered_by_wildcards(plain: Set[str], wildcards: Set[str]) -> S
                 break
         if not covered:
             out.add(d)
+
     return out
 
 def conservative_wildcard_prune(wildcards: Set[str]) -> Set[str]:
     """
-    Optional + conservative wildcard pruning.
-
-    ONLY prunes when the pattern is clearly redundant:
-      1) If you have "*.example.com", then remove "foo*.example.com", "bar-*.example.com", etc
-         (because "*.example.com" matches all subdomains).
-    This avoids risky 'glob contains glob' logic.
-
-    NOTE: This does NOT attempt to prove device-metrics-*.amazon.com covers device-metrics-us*.amazon.com,
-    because doing that safely for arbitrary globs is trickier than it looks.
+    Optional conservative pruning:
+    If '*.example.com' exists, drop more specific patterns under that base
+    like 'foo*.example.com' or 'device-*.example.com' (since *.example.com covers all subdomains).
     """
     if not wildcards:
         return wildcards
 
-    star_subdomain = {w for w in wildcards if w.startswith("*.") or w.startswith("*.")}
+    super_wc_bases = set()
+    for w in wildcards:
+        wl = w.lower()
+        if wl.startswith("*.") and "." in wl[2:]:
+            super_wc_bases.add(wl[2:])
 
-    # Normalize "*.example.com" to "example.com" base
-    bases = set()
-    for w in star_subdomain:
-        ww = w[2:] if w.startswith("*.") else w[2:]
-        bases.add(ww.lower())
-
-    if not bases:
+    if not super_wc_bases:
         return wildcards
 
     pruned = set()
     for w in wildcards:
         wl = w.lower()
-        # If there's a "*.base" that would cover w, and w is more specific than subdomain wildcard, drop w
-        # Example: "*.amazon.com" covers "device-metrics-*.amazon.com"
         redundant = False
-        for base in bases:
-            if wl.endswith("." + base) and wl != "*." + base and wl != "*." + base:
-                # ensure it is indeed a subdomain-pattern under base (has at least one dot before base)
-                left = wl[: -(len(base) + 1)]
-                if left and left.endswith("."):
-                    redundant = True
-                    break
+        for base in super_wc_bases:
+            if wl == "*." + base:
+                continue
+            if wl.endswith("." + base) and "." in wl[: -(len(base) + 1)]:
+                redundant = True
+                break
         if not redundant:
             pruned.add(w)
+
     return pruned
 
 def dedupe_domains(domains: Set[str]) -> Set[str]:
-    """
-    Full dedupe pipeline:
-      - split wildcards vs plain
-      - plain: remove redundant subdomains (bar.com makes foo.bar.com redundant)
-      - plain: remove entries matched by wildcard patterns (device-metrics-*.amazon.com covers device-metrics-us.amazon.com)
-      - optional conservative wildcard pruning
-    """
     print("🧹 Deduplicating domains (subdomains + wildcards)...")
     sys.stdout.flush()
 
     domain_set = set(domains)
-
     wildcards = {d for d in domain_set if "*" in d}
     plain = {d for d in domain_set if "*" not in d}
 
     if DEDUP_SUBDOMAINS:
         plain = remove_plain_redundant_subdomains(plain)
 
-    if DEDUP_PLAIN_COVERED_BY_WILDCARDS and wildcards:
+    if DEDUP_PLAIN_COVERED_BY_WILDCARDS:
         plain = remove_plain_covered_by_wildcards(plain, wildcards)
 
-    if DEDUP_WILDCARDS_CONSERVATIVE and wildcards:
+    if DEDUP_WILDCARDS_CONSERVATIVE:
         wildcards = conservative_wildcard_prune(wildcards)
 
     result = plain | wildcards
@@ -263,7 +231,11 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
     found: Set[str] = set()
 
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(
+            url,
+            timeout=30,
+            headers={"User-Agent": "blocklist-gen/1.0 (+https://github.com/royerlraph79/AdGuard)"}
+        )
         r.raise_for_status()
         text = r.text
     except Exception as e:
@@ -284,7 +256,7 @@ def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str,
             stats["adblock_rules"] += 1
         elif kind == "hosts":
             stats["hosts_rules"] += 1
-        elif kind == "plain":
+        else:
             stats["plain_domains"] += 1
 
         domain = normalize_token(token)
@@ -322,9 +294,9 @@ def main():
 
     for url in urls:
         domains, stats = load_domains_from_url(url, all_domains)
+
         overall["sources"] += 1
         overall["parsed_total"] += stats["total_lines"]
-
         for k in DEFAULT_STATS:
             overall[k] += stats[k]
 
@@ -350,7 +322,6 @@ def main():
 
     print("🏁 Done.")
     sys.stdout.flush()
-
 
 if __name__ == "__main__":
     main()
