@@ -20,7 +20,7 @@ COMMENT_PREFIXES = ("#", "!", "//", ";")
 
 
 # ============================================================
-# DNS VALIDATION (STRICT RFC)
+# STRICT DNS VALIDATION
 # ============================================================
 
 LABEL_RE = re.compile(
@@ -30,6 +30,21 @@ LABEL_RE = re.compile(
 
 TLD_RE = re.compile(
     r"^[a-z]{2,63}$",
+    re.IGNORECASE
+)
+
+SCHEME_RE = re.compile(
+    r"^https?://",
+    re.IGNORECASE
+)
+
+HOSTS_RE = re.compile(
+    r"^\s*(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
+    re.IGNORECASE
+)
+
+ADB_RULE_RE = re.compile(
+    r"^\|\|([^\^/]+)\^",
     re.IGNORECASE
 )
 
@@ -45,37 +60,48 @@ def is_valid_domain(domain: str) -> bool:
         return False
 
     for label in parts:
-
         if not LABEL_RE.match(label):
             return False
 
-    tld = parts[-1]
-
-    if not TLD_RE.match(tld):
+    if not TLD_RE.match(parts[-1]):
         return False
 
     return True
 
 
 # ============================================================
-# PARSERS
+# DOMAIN NORMALIZATION
 # ============================================================
 
-HOSTS_RE = re.compile(
-    r"^\s*(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
-    re.IGNORECASE
-)
+def normalize_domain(token: str) -> str:
 
-ADB_RULE_RE = re.compile(
-    r"^\|\|([a-z0-9.*-]+)\^",
-    re.IGNORECASE
-)
+    d = token.strip().lower()
 
-SCHEME_RE = re.compile(
-    r"^https?://",
-    re.IGNORECASE
-)
+    if not d:
+        return ""
 
+    d = SCHEME_RE.sub("", d)
+
+    d = d.split("/")[0]
+    d = d.split("?")[0]
+    d = d.split("#")[0]
+    d = d.split(":")[0]
+
+    d = d.strip(".^")
+
+    # reject ALL wildcards (useless in DNS if root exists)
+    if "*" in d:
+        return ""
+
+    if not is_valid_domain(d):
+        return ""
+
+    return d
+
+
+# ============================================================
+# PARSING
+# ============================================================
 
 def is_comment(line: str) -> bool:
 
@@ -97,73 +123,7 @@ def extract_domain(line: str) -> str:
     if m:
         return m.group(1)
 
-    token = line.split()[0]
-
-    return token
-
-
-def normalize_domain(token: str) -> str:
-
-    d = token.strip().lower()
-
-    if not d:
-        return ""
-
-    d = SCHEME_RE.sub("", d)
-
-    d = d.split("/")[0]
-    d = d.split("?")[0]
-    d = d.split("#")[0]
-    d = d.split(":")[0]
-
-    if d.startswith("*."):
-        d = d[2:]
-
-    d = d.strip(".^")
-
-    if "*" in d:
-        return d
-
-    if not is_valid_domain(d):
-        return ""
-
-    return d
-
-
-# ============================================================
-# CACHE
-# ============================================================
-
-def load_cache() -> Dict:
-
-    try:
-
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-
-    except:
-        return {}
-
-
-def save_cache(cache: Dict):
-
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f, indent=2)
-
-
-# ============================================================
-# LOAD SOURCES FROM sources.txt
-# ============================================================
-
-def load_sources():
-
-    with open(SOURCE_FILE, "r", encoding="utf-8") as f:
-
-        return [
-            line.strip()
-            for line in f
-            if not is_comment(line)
-        ]
+    return line.split()[0]
 
 
 # ============================================================
@@ -184,18 +144,31 @@ def fetch(url: str) -> str:
 
 
 # ============================================================
+# LOAD SOURCES
+# ============================================================
+
+def load_sources():
+
+    with open(SOURCE_FILE, encoding="utf-8") as f:
+
+        return [
+            line.strip()
+            for line in f
+            if not is_comment(line)
+        ]
+
+
+# ============================================================
 # BUILD DOMAIN SET
 # ============================================================
 
-def build_domains():
+def build_domains() -> Set[str]:
 
     print("🚀 Generating royerlraph79 AdGuard Blocklist")
 
-    cache = load_cache()
+    domains = set()
 
     sources = load_sources()
-
-    all_domains: Set[str] = set()
 
     for url in sources:
 
@@ -219,44 +192,49 @@ def build_domains():
                 if not domain:
                     continue
 
-                all_domains.add(domain)
+                domains.add(domain)
 
                 added += 1
 
             print(f"   Added: {added}")
 
-            cache[url] = {"ok": True}
-
         except Exception as e:
 
             print(f"❌ Error: {url} → {e}")
 
-    save_cache(cache)
+    print(f"🧠 Raw domains: {len(domains)}")
 
-    print(f"🧠 Raw domains: {len(all_domains)}")
-
-    return all_domains
+    return domains
 
 
 # ============================================================
-# DEDUPE
+# ROOT DOMAIN DEDUPLICATION
 # ============================================================
 
-def dedupe(domains: Set[str]) -> Set[str]:
+def dedupe_domains(domains: Set[str]) -> Set[str]:
 
-    print("🧹 Deduplicating")
+    print("🧹 Removing redundant subdomains")
 
-    plain = set()
-    wildcards = set()
+    domain_set = set(domains)
 
-    for d in domains:
+    result = set()
 
-        if "*" in d:
-            wildcards.add(d)
-        else:
-            plain.add(d)
+    for domain in sorted(domain_set):
 
-    result = plain | wildcards
+        parts = domain.split(".")
+
+        redundant = False
+
+        for i in range(1, len(parts)):
+
+            parent = ".".join(parts[i:])
+
+            if parent in domain_set:
+                redundant = True
+                break
+
+        if not redundant:
+            result.add(domain)
 
     print(f"🧠 Final domains: {len(result)}")
 
@@ -264,10 +242,15 @@ def dedupe(domains: Set[str]) -> Set[str]:
 
 
 # ============================================================
-# WRITE MAIN LIST
+# WRITE FILES
 # ============================================================
 
 MAIN_HEADER = """! Title: royerlraph79 AdGuard Blocklist
+! Expires: 24 hours
+
+"""
+
+MOBILE_HEADER = """! Title: royerlraph79 AdGuard Blocklist Mobile
 ! Expires: 24 hours
 
 """
@@ -280,23 +263,12 @@ def write_main(domains: Set[str]):
         f.write(MAIN_HEADER)
 
         for d in sorted(domains):
-
             f.write(f"||{d}^\n")
-
-
-# ============================================================
-# WRITE MOBILE LIST
-# ============================================================
-
-MOBILE_HEADER = """! Title: royerlraph79 AdGuard Blocklist Mobile
-! Expires: 24 hours
-
-"""
 
 
 def write_mobile(domains: Set[str]):
 
-    mobile = {d for d in domains if "*" not in d}
+    mobile = set(domains)
 
     print(f"📱 Mobile domains: {len(mobile)}")
 
@@ -305,7 +277,6 @@ def write_mobile(domains: Set[str]):
         f.write(MOBILE_HEADER)
 
         for d in sorted(mobile):
-
             f.write(f"||{d}^\n")
 
 
@@ -317,7 +288,7 @@ def main():
 
     domains = build_domains()
 
-    domains = dedupe(domains)
+    domains = dedupe_domains(domains)
 
     write_main(domains)
 
