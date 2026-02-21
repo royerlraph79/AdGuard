@@ -2,6 +2,7 @@ import re
 import sys
 import requests
 from typing import Set, Tuple, Dict
+from datetime import datetime
 
 # ---------------------------
 # Config
@@ -20,76 +21,102 @@ HOSTS_RE = re.compile(
 SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
 TRAILING_OPTIONS_RE = re.compile(r"\$.*$")
 
+# Strict hostname validation (DNS-safe only)
+VALID_HOST_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+
 DEFAULT_STATS = {
     "total_lines": 0,
-    "added": 0,
+    "invalid_lines": 0,
     "duplicates": 0,
-    "invalid": 0,
+    "added": 0,
+    "skipped": 0,
 }
 
 # ---------------------------
-# Basic helpers
+# Helpers
 # ---------------------------
 
 def is_comment_or_empty(line: str) -> bool:
     ln = line.strip()
-    return not ln or ln.startswith(COMMENT_PREFIXES)
+    return (not ln) or ln.startswith(COMMENT_PREFIXES)
+
+# ---------------------------
+# Normalization
+# ---------------------------
 
 def normalize_token(token: str) -> str:
+
     d = token.strip().lower()
 
     if not d:
         return ""
 
+    # Reject whitelist artifacts
+    if d.startswith("@@"):
+        return ""
+
+    # Reject wildcards completely (DNS cannot use them)
+    if "*" in d:
+        return ""
+
+    # Reject invalid starting chars
+    if d.startswith(("-", ".", "_")):
+        return ""
+
+    # Remove scheme/path/query/fragment
     d = SCHEME_RE.sub("", d)
     d = d.split("/")[0].split("?")[0].split("#")[0]
 
+    # Remove port
     if ":" in d:
         d = d.split(":")[0]
 
-    if d.startswith("*."):
-        d = d[2:]
-
+    # Remove trailing rule chars
     d = d.rstrip(".^")
 
-    if "." not in d:
-        return ""
-
-    if any(c.isspace() for c in d):
+    # Strict DNS hostname validation
+    if not VALID_HOST_RE.match(d):
         return ""
 
     return d
 
 # ---------------------------
-# Extractors
+# Extract domain
 # ---------------------------
 
-def extract_adblock(line: str) -> str:
+def extract_from_adblock_rule(line: str) -> str:
 
-    if line.startswith("@@"):
+    ln = line.strip()
+
+    # Reject whitelist rules immediately
+    if ln.startswith("@@"):
         return ""
 
-    line = TRAILING_OPTIONS_RE.sub("", line)
+    ln = TRAILING_OPTIONS_RE.sub("", ln)
 
-    m = re.match(r"^\|\|([^\^/]+)", line)
+    m = re.match(r"^\|\|([^\^/]+)", ln)
 
     return m.group(1) if m else ""
 
-def choose_token(line: str) -> str:
+def choose_token(raw_line: str) -> Tuple[str, str]:
 
-    ad = extract_adblock(line)
+    ln = raw_line.strip()
+
+    ad = extract_from_adblock_rule(ln)
+
     if ad:
-        return ad
+        return ("adblock", ad)
 
-    hm = HOSTS_RE.match(line)
+    hm = HOSTS_RE.match(ln)
+
     if hm:
-        return hm.group(1)
+        return ("hosts", hm.group(1))
 
-    parts = line.split()
-    if parts:
-        return parts[0]
+    token = ln.split()[0] if ln else ""
 
-    return ""
+    return ("plain", token)
 
 # ---------------------------
 # Correct hierarchy dedupe
@@ -100,11 +127,8 @@ def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
     print("🧹 Removing redundant subdomains...")
     sys.stdout.flush()
 
-    plain = {d for d in domains if "*" not in d}
-    wild = {d for d in domains if "*" in d}
-
-    # sort shortest first (root domains first)
-    ordered = sorted(plain, key=lambda d: d.count("."))
+    # Sort parent domains first
+    ordered = sorted(domains, key=lambda d: d.count("."))
 
     kept = set()
 
@@ -115,7 +139,9 @@ def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
         redundant = False
 
         for i in range(1, len(parts)):
+
             parent = ".".join(parts[i:])
+
             if parent in kept:
                 redundant = True
                 break
@@ -123,61 +149,64 @@ def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
         if not redundant:
             kept.add(domain)
 
-    result = kept | wild
-
-    print(f"Removed {len(domains) - len(result)} redundant domains")
+    print("✅ Subdomain dedupe complete.")
     sys.stdout.flush()
 
-    return result
+    return kept
 
 # ---------------------------
-# Fetch
+# Fetch + aggregate
 # ---------------------------
 
-def fetch_source(url: str, seen: Set[str]) -> Tuple[Set[str], Dict]:
+def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str, int]]:
 
-    print(f"⬇️ Fetching {url}")
+    print(f"⬇️ Updated: {url}")
     sys.stdout.flush()
 
     stats = DEFAULT_STATS.copy()
-
     found = set()
 
     try:
 
         r = requests.get(
             url,
-            timeout=30,
+            timeout=60,
             headers={
-                "User-Agent":
-                "royerlraph79-blocklist-generator"
+                "User-Agent": "royerlraph79-AdGuardBlocklist/1.0"
             }
         )
 
         r.raise_for_status()
 
+        text = r.text
+
     except Exception as e:
 
-        print(f"❌ Failed: {e}")
+        print(f"❌ Error fetching {url}: {e}")
         sys.stdout.flush()
-
         return found, stats
 
-    for raw in r.text.splitlines():
+    for raw in text.splitlines():
 
         stats["total_lines"] += 1
 
-        line = raw.strip()
+        ln = raw.strip()
 
-        if is_comment_or_empty(line):
+        # Reject whitelist rules FIRST
+        if ln.startswith("@@"):
+            stats["invalid_lines"] += 1
             continue
 
-        token = choose_token(line)
+        if is_comment_or_empty(ln):
+            stats["invalid_lines"] += 1
+            continue
+
+        kind, token = choose_token(ln)
 
         domain = normalize_token(token)
 
         if not domain:
-            stats["invalid"] += 1
+            stats["invalid_lines"] += 1
             continue
 
         if domain in seen:
@@ -188,7 +217,30 @@ def fetch_source(url: str, seen: Set[str]) -> Tuple[Set[str], Dict]:
         found.add(domain)
         stats["added"] += 1
 
+    stats["skipped"] = stats["invalid_lines"] + stats["duplicates"]
+
     return found, stats
+
+# ---------------------------
+# Write output
+# ---------------------------
+
+def write_output(domains: Set[str]):
+
+    now = datetime.utcnow().strftime("%a %b %d %H:%M:%S %Y")
+
+    print(f"📦 Writing: {OUTPUT_FILE}")
+    sys.stdout.flush()
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+
+        f.write("! Title: royerlraph79 AdGuard Blocklist\n")
+        f.write("! Expires: 24 hours\n")
+        f.write(f"! Generated: {now}\n")
+        f.write(f"! Domains: {len(domains)}\n\n")
+
+        for domain in sorted(domains):
+            f.write(f"||{domain}^\n")
 
 # ---------------------------
 # Main
@@ -200,45 +252,31 @@ def main():
     sys.stdout.flush()
 
     with open(SOURCE_FILE, "r", encoding="utf-8") as f:
-        urls = [l.strip() for l in f if not is_comment_or_empty(l)]
 
-    seen = set()
+        urls = [
+            line.strip()
+            for line in f
+            if not is_comment_or_empty(line)
+        ]
+
+    all_domains = set()
 
     for url in urls:
 
-        domains, stats = fetch_source(url, seen)
+        load_domains_from_url(url, all_domains)
 
-        print(
-            f"Lines: {stats['total_lines']}  "
-            f"Added: {stats['added']}  "
-            f"Dup: {stats['duplicates']}  "
-            f"Invalid: {stats['invalid']}\n"
-        )
+    print(f"\n🧠 Raw domains: {len(all_domains)}")
+    sys.stdout.flush()
 
-        sys.stdout.flush()
+    final_domains = remove_redundant_subdomains(all_domains)
 
-    print(f"\n🧠 Raw unique domains: {len(seen)}")
+    print(f"🧠 Final domains: {len(final_domains)}\n")
+    sys.stdout.flush()
 
-    final = remove_redundant_subdomains(seen)
+    write_output(final_domains)
 
-    print(f"🧠 Final domains: {len(final)}")
-
-    print(f"\n💾 Writing {OUTPUT_FILE}")
-
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-
-        f.write("! Title: royerlraph79 AdGuard Blocklist\n")
-        f.write("! Expires: 24 hours\n\n")
-
-        for i, d in enumerate(sorted(final), 1):
-
-            f.write(f"||{d}^\n")
-
-            if i % 50000 == 0:
-                print(f"Wrote {i}")
-                sys.stdout.flush()
-
-    print("\n🏁 Done")
+    print("🏁 Done.")
+    sys.stdout.flush()
 
 # ---------------------------
 
