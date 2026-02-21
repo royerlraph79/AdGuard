@@ -1,38 +1,12 @@
 {
-  "dead_scores": {
-    "dead_score": 0,
-    "etag": "",
-    "last_modified": "",
-    "sha": ""
-  },
-  "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt": {
-    "ok": true
-  },
-  "https://badmojr.github.io/1Hosts/Lite/adblock.txt": {
-    "ok": true
-  },
-  "https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt": {
-    "ok": true
-  },
-  "https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt": {
-    "ok": true
-  },
-  "https://blocklistproject.github.io/Lists/basic.txt": {
-    "ok": true
-  },
-  "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt": {
-    "ok": true
-  },
-  "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/urlshortener.txt": {
-    "ok": true
-  },
-  "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext": {
-    "ok": true
-  },
-  "https://raw.githubusercontent.com/anudeepND/blacklist/master/adservers.txt": {
-    "ok": true
-  },
-  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.mini.txt": {
-    "ok": true
-  }
+  "https://raw.githubusercontent.com/anudeepND/blacklist/master/adservers.txt": "4cbe4ca57d726b9964f5b782cc7c211243cd7f7fa4b5947af3a2b3ec3560477e",
+  "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt": "5ffa3b6a7a2f1b4257001f2dc6de5d0d992ef1f64ef58f35beab44c2f80cc53b",
+  "https://badmojr.github.io/1Hosts/Lite/adblock.txt": "1485bf26168ccd55dabb5cb883e8cebde3e122321f95393701700f55f671c058",
+  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.mini.txt": "aebd5d611eeb9fe9f4e57b74cda4e6a7d3802c6b1bcfc8a43647113165903327",
+  "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext": "a62757ae2da339284de883a721df485a59a21640f621f2a3db517f6457024c3a",
+  "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/urlshortener.txt": "28490c4537e52761fe90c03597a6bbd3405b390b6ac34488dc731f0581503b7d",
+  "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt": "ef0c2df8dee3f81b20c664c601a780f817823afa3fd76208f06c71f96b9eda6a",
+  "https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt": "bf089aec94c6d5f63b1247cc1af99a213e400a03e31b6c19079305c30db07132",
+  "https://blocklistproject.github.io/Lists/basic.txt": "cc8a690b9d95025e75c3e6ee367e8f06f3e54f9b4c97ca5b7de331de8689f4df",
+  "https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt": "09e922f194ff83eb039d357903de0dbc02cc7a6236607724dc8e4e32677b4f0b"
 }
