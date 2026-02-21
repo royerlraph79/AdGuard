@@ -1,66 +1,47 @@
 import re
-import json
-import time
-import requests
-import idna
 import sys
+import requests
+from typing import Set, Tuple, Dict
+
+# ---------------------------
+# Config
+# ---------------------------
 
 SOURCE_FILE = "sources.txt"
 OUTPUT_FILE = "adguard_blocklist.txt"
-CACHE_FILE = "cache.json"
-
-USER_AGENT = "royerlraph79-blocklist-generator/2.0"
 
 COMMENT_PREFIXES = ("#", "!", "//", ";")
 
-INVALID_PREFIX_RE = re.compile(
-    r"^(?:0\.0\.0\.0|127\.0\.0\.1|::1)\.",
-    re.IGNORECASE,
-)
-
-VALID_HOST_RE = re.compile(r"^[a-z0-9.-]+$")
-
 HOSTS_RE = re.compile(
     r"^\s*(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
-    re.IGNORECASE,
+    re.IGNORECASE
 )
 
-ADB_RE = re.compile(r"^\|\|([^\^/]+)")
+SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
+TRAILING_OPTIONS_RE = re.compile(r"\$.*$")
 
-
-# ---------------------------
-# Cache
-# ---------------------------
-
-def load_cache():
-
-    try:
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
-
-
-def save_cache(cache):
-
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f)
-
+DEFAULT_STATS = {
+    "total_lines": 0,
+    "added": 0,
+    "duplicates": 0,
+    "invalid": 0,
+}
 
 # ---------------------------
-# Normalize domain safely
+# Basic helpers
 # ---------------------------
 
-def normalize(domain):
+def is_comment_or_empty(line: str) -> bool:
+    ln = line.strip()
+    return not ln or ln.startswith(COMMENT_PREFIXES)
 
-    d = domain.strip().lower()
+def normalize_token(token: str) -> str:
+    d = token.strip().lower()
 
     if not d:
         return ""
 
-    if d.startswith("http://") or d.startswith("https://"):
-        d = d.split("://", 1)[1]
-
+    d = SCHEME_RE.sub("", d)
     d = d.split("/")[0].split("?")[0].split("#")[0]
 
     if ":" in d:
@@ -69,167 +50,145 @@ def normalize(domain):
     if d.startswith("*."):
         d = d[2:]
 
-    if "*" in d:
+    d = d.rstrip(".^")
+
+    if "." not in d:
         return ""
 
-    if INVALID_PREFIX_RE.match(d):
-        return ""
-
-    if (
-        d.startswith("-")
-        or d.endswith("-")
-        or ".." in d
-        or "." not in d
-    ):
-        return ""
-
-    if not VALID_HOST_RE.fullmatch(d):
-        return ""
-
-    try:
-        d = idna.encode(d).decode("ascii")
-    except:
+    if any(c.isspace() for c in d):
         return ""
 
     return d
 
-
 # ---------------------------
-# Extract domain
+# Extractors
 # ---------------------------
 
-def extract(line):
+def extract_adblock(line: str) -> str:
 
-    line = line.strip()
-
-    if not line or line.startswith(COMMENT_PREFIXES):
+    if line.startswith("@@"):
         return ""
 
-    m = ADB_RE.match(line)
-    if m:
-        return normalize(m.group(1))
+    line = TRAILING_OPTIONS_RE.sub("", line)
 
-    m = HOSTS_RE.match(line)
-    if m:
-        return normalize(m.group(1))
+    m = re.match(r"^\|\|([^\^/]+)", line)
 
-    return normalize(line.split()[0])
+    return m.group(1) if m else ""
 
+def choose_token(line: str) -> str:
+
+    ad = extract_adblock(line)
+    if ad:
+        return ad
+
+    hm = HOSTS_RE.match(line)
+    if hm:
+        return hm.group(1)
+
+    parts = line.split()
+    if parts:
+        return parts[0]
+
+    return ""
 
 # ---------------------------
-# FAST DEDUPE (O(n log n))
+# Correct hierarchy dedupe
 # ---------------------------
 
-def dedupe(domains):
+def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
 
-    print("🧹 Deduplicating efficiently...", flush=True)
+    print("🧹 Removing redundant subdomains...")
+    sys.stdout.flush()
 
-    domains_sorted = sorted(domains)
+    plain = {d for d in domains if "*" not in d}
+    wild = {d for d in domains if "*" in d}
+
+    # sort shortest first (root domains first)
+    ordered = sorted(plain, key=lambda d: d.count("."))
 
     kept = set()
 
-    suffix_tree = {}
+    for domain in ordered:
 
-    total = len(domains_sorted)
+        parts = domain.split(".")
 
-    for i, domain in enumerate(domains_sorted, 1):
-
-        parts = domain.split(".")[::-1]
-
-        node = suffix_tree
         redundant = False
 
-        for part in parts:
-
-            if "_end_" in node:
+        for i in range(1, len(parts)):
+            parent = ".".join(parts[i:])
+            if parent in kept:
                 redundant = True
                 break
 
-            if part not in node:
-                node[part] = {}
-
-            node = node[part]
-
         if not redundant:
-            node["_end_"] = True
             kept.add(domain)
 
-        if i % 50000 == 0:
-            print(f"   {i}/{total} processed", flush=True)
+    result = kept | wild
 
-    print("✅ Deduplication complete", flush=True)
+    print(f"Removed {len(domains) - len(result)} redundant domains")
+    sys.stdout.flush()
 
-    return kept
-
+    return result
 
 # ---------------------------
-# Fetch source
+# Fetch
 # ---------------------------
 
-def fetch(url, cache):
+def fetch_source(url: str, seen: Set[str]) -> Tuple[Set[str], Dict]:
 
-    headers = {"User-Agent": USER_AGENT}
+    print(f"⬇️ Fetching {url}")
+    sys.stdout.flush()
 
-    try:
-
-        r = requests.get(url, headers=headers, timeout=60)
-        r.raise_for_status()
-        text = r.text
-
-    except Exception as e:
-
-        print("❌ Fetch failed:", url, e, flush=True)
-        return set()
-
-    new_hash = hash(text)
-
-    if cache.get(url) == new_hash:
-
-        print("⏭️ Unchanged:", url, flush=True)
-        return set()
-
-    cache[url] = new_hash
-
-    print("⬇️ Processing:", url, flush=True)
+    stats = DEFAULT_STATS.copy()
 
     found = set()
 
-    for line in text.splitlines():
+    try:
 
-        d = extract(line)
+        r = requests.get(
+            url,
+            timeout=30,
+            headers={
+                "User-Agent":
+                "royerlraph79-blocklist-generator"
+            }
+        )
 
-        if d:
-            found.add(d)
+        r.raise_for_status()
 
-    print(f"   {len(found)} domains extracted", flush=True)
+    except Exception as e:
 
-    return found
+        print(f"❌ Failed: {e}")
+        sys.stdout.flush()
 
+        return found, stats
 
-# ---------------------------
-# Write blocklist
-# ---------------------------
+    for raw in r.text.splitlines():
 
-def write(domains):
+        stats["total_lines"] += 1
 
-    print("💾 Writing blocklist...", flush=True)
+        line = raw.strip()
 
-    with open(OUTPUT_FILE, "w") as f:
+        if is_comment_or_empty(line):
+            continue
 
-        f.write("! Title: royerlraph79 AdGuard Blocklist\n")
-        f.write("! Expires: 24 hours\n")
-        f.write(f"! Generated: {time.ctime()}\n")
-        f.write(f"! Domains: {len(domains)}\n\n")
+        token = choose_token(line)
 
-        for i, d in enumerate(sorted(domains), 1):
+        domain = normalize_token(token)
 
-            f.write(f"||{d}^\n")
+        if not domain:
+            stats["invalid"] += 1
+            continue
 
-            if i % 100000 == 0:
-                print(f"   {i} written", flush=True)
+        if domain in seen:
+            stats["duplicates"] += 1
+            continue
 
-    print("✅ Write complete", flush=True)
+        seen.add(domain)
+        found.add(domain)
+        stats["added"] += 1
 
+    return found, stats
 
 # ---------------------------
 # Main
@@ -237,44 +196,51 @@ def write(domains):
 
 def main():
 
-    print("\n🚀 royerlraph79 AdGuard Blocklist Generator\n", flush=True)
+    print("🚀 royerlraph79 AdGuard Blocklist generator\n")
+    sys.stdout.flush()
 
-    cache = load_cache()
+    with open(SOURCE_FILE, "r", encoding="utf-8") as f:
+        urls = [l.strip() for l in f if not is_comment_or_empty(l)]
 
-    with open(SOURCE_FILE) as f:
+    seen = set()
 
-        sources = [
-            s.strip()
-            for s in f
-            if s.strip() and not s.strip().startswith("#")
-        ]
+    for url in urls:
 
-    all_domains = set()
+        domains, stats = fetch_source(url, seen)
 
-    total_sources = len(sources)
+        print(
+            f"Lines: {stats['total_lines']}  "
+            f"Added: {stats['added']}  "
+            f"Dup: {stats['duplicates']}  "
+            f"Invalid: {stats['invalid']}\n"
+        )
 
-    for i, url in enumerate(sources, 1):
+        sys.stdout.flush()
 
-        print(f"\n🌐 Source {i}/{total_sources}", flush=True)
+    print(f"\n🧠 Raw unique domains: {len(seen)}")
 
-        domains = fetch(url, cache)
+    final = remove_redundant_subdomains(seen)
 
-        all_domains |= domains
+    print(f"🧠 Final domains: {len(final)}")
 
-        print(f"   Total collected: {len(all_domains)}", flush=True)
+    print(f"\n💾 Writing {OUTPUT_FILE}")
 
-    print("\n🧠 Raw domains:", len(all_domains), flush=True)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
 
-    clean = dedupe(all_domains)
+        f.write("! Title: royerlraph79 AdGuard Blocklist\n")
+        f.write("! Expires: 24 hours\n\n")
 
-    print("🧠 Final domains:", len(clean), flush=True)
+        for i, d in enumerate(sorted(final), 1):
 
-    write(clean)
+            f.write(f"||{d}^\n")
 
-    save_cache(cache)
+            if i % 50000 == 0:
+                print(f"Wrote {i}")
+                sys.stdout.flush()
 
-    print("\n🏁 Done.\n", flush=True)
+    print("\n🏁 Done")
 
+# ---------------------------
 
 if __name__ == "__main__":
     main()
