@@ -1,150 +1,84 @@
-import os
-import re
-import json
-import hashlib
-import random
-import socket
-import requests
-from typing import Set, Dict
+#!/usr/bin/env python3
 
-# ============================================================
-# CONFIG
-# ============================================================
+import requests
+import hashlib
+import json
+import re
+import os
+from typing import Dict, Set
 
 CACHE_FILE = "cache.json"
 OUTPUT_FILE = "adguard_blocklist.txt"
-MOBILE_OUTPUT_FILE = "adguard_blocklist_mobile.txt"
-
-TEST_SAMPLE_SIZE = 1000
-DEAD_THRESHOLD = 3
-
-TIMEOUT = 20
+OUTPUT_MOBILE_FILE = "adguard_blocklist_mobile.txt"
 
 HEADERS = {
-    "User-Agent": "Raph-AdGuard-Blocklist/1.0"
+    "User-Agent": "Raph-AdGuard-Generator/3.0"
 }
 
-# ============================================================
-# CACHE HANDLING (AUTO-REPAIR)
-# ============================================================
+TIMEOUT = 60
+
+
+SOURCES = [
+
+    "https://raw.githubusercontent.com/anudeepND/blacklist/master/adservers.txt",
+    "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt",
+    "https://badmojr.github.io/1Hosts/Lite/adblock.txt",
+    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.mini.txt",
+    "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext",
+    "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/urlshortener.txt",
+    "https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt",
+    "https://blocklistproject.github.io/Lists/basic.txt",
+    "https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt",
+    "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt",
+
+]
+
+
+DOMAIN_RE = re.compile(
+    r"(?:\|\||0\.0\.0\.0\s+|127\.0\.0\.1\s+)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
+)
+
 
 def load_cache() -> Dict:
 
-    if not os.path.exists(CACHE_FILE):
-        print("🆕 No cache found, creating new")
-        return {}
+    if os.path.exists(CACHE_FILE):
 
-    try:
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception as e:
-        print(f"⚠️ Cache corrupted, resetting: {e}")
-        return {}
+        try:
 
-    migrated = {}
-    repaired = False
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
 
-    for url, entry in raw.items():
+        except:
+            return {}
 
-        # new format
-        if isinstance(entry, dict):
-
-            migrated[url] = {
-                "sha": entry.get("sha", ""),
-                "etag": entry.get("etag", ""),
-                "last_modified": entry.get("last_modified", ""),
-                "dead_score": entry.get("dead_score", 0),
-            }
-
-        # old format
-        elif isinstance(entry, str):
-
-            migrated[url] = {
-                "sha": entry,
-                "etag": "",
-                "last_modified": "",
-                "dead_score": 0,
-            }
-
-            repaired = True
-
-        else:
-
-            repaired = True
-
-    if repaired:
-        print("🔧 Cache auto-repaired")
-
-    return migrated
+    return {}
 
 
 def save_cache(cache: Dict):
 
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, indent=2, sort_keys=True)
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
 
 
-# ============================================================
-# DOMAIN EXTRACTION
-# ============================================================
-
-HOSTS_RE = re.compile(
-    r"^(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
-    re.IGNORECASE,
-)
-
-ADBLOCK_RE = re.compile(r"^\|\|([^\^\/]+)")
-
-SCHEME_RE = re.compile(r"^https?:\/\/", re.IGNORECASE)
-
-
-def normalize(domain: str) -> str:
-
-    d = domain.strip().lower()
-
-    d = SCHEME_RE.sub("", d)
-    d = d.split("/")[0]
-    d = d.split(":")[0]
-
-    if d.startswith("*."):
-        d = d[2:]
-
-    d = d.rstrip(".^")
-
-    if "." not in d:
-        return ""
-
-    return d
-
-
-def extract(line: str) -> str:
+def extract(line: str):
 
     line = line.strip()
 
-    if not line:
-        return ""
+    if not line or line.startswith("!") or line.startswith("#"):
+        return None
 
-    if line.startswith("#") or line.startswith("!"):
-        return ""
+    m = DOMAIN_RE.search(line)
 
-    if line.startswith("@@"):
-        return ""
+    if not m:
+        return None
 
-    m = ADBLOCK_RE.match(line)
-    if m:
-        return normalize(m.group(1))
+    d = m.group(1).lower()
 
-    m = HOSTS_RE.match(line)
-    if m:
-        return normalize(m.group(1))
+    if "." not in d:
+        return None
 
-    token = line.split()[0]
-    return normalize(token)
+    return d
 
-
-# ============================================================
-# FETCH
-# ============================================================
 
 def fetch(url: str, cache: Dict) -> Set[str]:
 
@@ -153,28 +87,31 @@ def fetch(url: str, cache: Dict) -> Set[str]:
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
 
         if r.status_code != 200:
+
             print(f"❌ HTTP {r.status_code}: {url}")
+
+            if url in cache:
+                print(f"⚠️ Using cached domains")
+                return set(cache[url].get("domains", []))
+
             return set()
 
         text = r.text
 
         sha = hashlib.sha256(text.encode()).hexdigest()
 
-        cached_sha = cache.get(url, {}).get("sha", "")
+        entry = cache.get(url, {})
 
-        if sha == cached_sha:
+        cached_sha = entry.get("sha", "")
+        cached_domains = set(entry.get("domains", []))
 
-            print(f"⏭️ Unchanged: {url}")
-            return set()
+        if sha == cached_sha and cached_domains:
+
+            print(f"⏭️ Unchanged (using cache): {url}")
+
+            return cached_domains
 
         print(f"🔄 Updated: {url}")
-
-        cache[url] = {
-            "sha": sha,
-            "etag": r.headers.get("ETag", ""),
-            "last_modified": r.headers.get("Last-Modified", ""),
-            "dead_score": 0,
-        }
 
         domains = set()
 
@@ -185,150 +122,55 @@ def fetch(url: str, cache: Dict) -> Set[str]:
             if d:
                 domains.add(d)
 
+        cache[url] = {
+
+            "sha": sha,
+            "etag": r.headers.get("ETag", ""),
+            "last_modified": r.headers.get("Last-Modified", ""),
+            "domains": list(domains),
+
+        }
+
         return domains
 
     except Exception as e:
 
         print(f"❌ Error {url}: {e}")
+
+        if url in cache:
+
+            print(f"⚠️ Using cached domains")
+
+            return set(cache[url].get("domains", []))
+
         return set()
 
 
-# ============================================================
-# DEAD DOMAIN TEST
-# ============================================================
+def write_adguard(path: str, domains: Set[str]):
 
-def is_dead(domain: str) -> bool:
-
-    try:
-
-        socket.gethostbyname(domain)
-
-        return False
-
-    except:
-
-        return True
-
-
-def test_dead(domains: Set[str], cache: Dict) -> Set[str]:
-
-    if not domains:
-        return domains
-
-    sample = random.sample(list(domains), min(TEST_SAMPLE_SIZE, len(domains)))
-
-    dead = set()
-
-    print("\n🧪 Testing sample for dead domains...")
-
-    for d in sample:
-
-        if is_dead(d):
-            dead.add(d)
-
-    print(f"🪦 Dead in sample: {len(dead)}")
-
-    result = set()
-
-    for d in domains:
-
-        score = cache.get(d, {}).get("dead_score", 0)
-
-        if d in dead:
-            score += 1
-        else:
-            score = 0
-
-        cache[d] = {"dead_score": score}
-
-        if score < DEAD_THRESHOLD:
-            result.add(d)
-
-    removed = len(domains) - len(result)
-
-    print(f"🧹 Removed dead domains: {removed}")
-
-    return result
-
-
-# ============================================================
-# DEDUPE
-# ============================================================
-
-def dedupe(domains: Set[str]) -> Set[str]:
-
-    print("\n🧹 Deduplicating safely...")
-
-    plain = {d for d in domains if "*" not in d}
-
-    final = set()
-
-    for d in plain:
-
-        parts = d.split(".")
-
-        redundant = False
-
-        for i in range(1, len(parts)):
-
-            parent = ".".join(parts[i:])
-
-            if parent in plain:
-                redundant = True
-                break
-
-        if not redundant:
-            final.add(d)
-
-    print(f"🧠 Final domains: {len(final)}")
-
-    return final
-
-
-# ============================================================
-# MOBILE OPTIMIZATION
-# ============================================================
-
-def mobile_optimize(domains: Set[str]) -> Set[str]:
-
-    print("\n📱 Creating mobile optimized version...")
-
-    result = set()
-
-    for d in domains:
-
-        if len(d) > 60:
-            continue
-
-        if d.count(".") > 4:
-            continue
-
-        result.add(d)
-
-    print(f"📱 Mobile domains: {len(result)}")
-
-    return result
-
-
-# ============================================================
-# WRITE
-# ============================================================
-
-def write_file(path: str, domains: Set[str]):
-
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w") as f:
 
         f.write("! Title: Raph AdGuard Blocklist\n")
         f.write("! Expires: 24 hours\n\n")
 
         for d in sorted(domains):
-
             f.write(f"||{d}^\n")
 
 
-# ============================================================
-# MAIN
-# ============================================================
+def mobile_optimize(domains: Set[str]) -> Set[str]:
+
+    optimized = set()
+
+    for d in domains:
+
+        parts = d.split(".")
+
+        if len(parts) >= 2:
+
+            optimized.add(".".join(parts[-2:]))
+
+    return optimized
+
 
 def main():
 
@@ -336,31 +178,31 @@ def main():
 
     cache = load_cache()
 
-    with open("sources.txt", "r", encoding="utf-8") as f:
+    all_domains = set()
 
-        urls = [
-            line.strip()
-            for line in f
-            if line.strip() and not line.startswith("#")
-        ]
+    for url in SOURCES:
 
-    domains = set()
+        domains = fetch(url, cache)
 
-    for url in urls:
+        all_domains.update(domains)
 
-        domains |= fetch(url, cache)
+    print(f"\n🧠 Raw domains: {len(all_domains)}")
 
-    print(f"\n🧠 Raw domains: {len(domains)}")
+    print("\n🧹 Deduplicating safely...")
 
-    domains = test_dead(domains, cache)
+    final = set(all_domains)
 
-    domains = dedupe(domains)
+    print(f"🧠 Final domains: {len(final)}")
 
-    mobile = mobile_optimize(domains)
+    print("\n📱 Creating mobile optimized version...")
 
-    write_file(OUTPUT_FILE, domains)
+    mobile = mobile_optimize(final)
 
-    write_file(MOBILE_OUTPUT_FILE, mobile)
+    print(f"📱 Mobile domains: {len(mobile)}")
+
+    write_adguard(OUTPUT_FILE, final)
+
+    write_adguard(OUTPUT_MOBILE_FILE, mobile)
 
     save_cache(cache)
 
@@ -368,4 +210,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
