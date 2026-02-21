@@ -1,225 +1,200 @@
-#!/usr/bin/env python3
-# royerlraph79 AdGuard Blocklist generator
-# Optimized for AdGuard iOS DNS-level blocking
-
-import requests
 import re
 import json
-import hashlib
 import time
-from pathlib import Path
+import requests
+import idna
+from typing import Set, Dict
 
-CACHE_FILE = "cache.json"
+SOURCE_FILE = "sources.txt"
 OUTPUT_FILE = "adguard_blocklist.txt"
-SOURCES_FILE = "sources.txt"
+CACHE_FILE = "cache.json"
 
-# strict domain validation
-DOMAIN_REGEX = re.compile(
-    r"^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$"
+USER_AGENT = "royerlraph79-blocklist-generator/1.0"
+
+# Reject invalid prefixes
+INVALID_PREFIX_RE = re.compile(
+    r"^(?:0\.0\.0\.0|127\.0\.0\.1|::1)\.",
+    re.IGNORECASE,
 )
 
-INVALID_PREFIXES = (
-    "-",
-    ".",
-    "*",
+# Reject illegal hostname chars
+VALID_HOST_RE = re.compile(r"^[a-z0-9.-]+$")
+
+HOSTS_RE = re.compile(
+    r"^\s*(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
+    re.IGNORECASE,
 )
 
-INVALID_CHARS = set("* _ / : ? & = %")
+ADB_RE = re.compile(r"^\|\|([^\^/]+)")
 
-HEADERS = {
-    "User-Agent": "royerlraph79-adguard-blocklist-generator"
-}
+COMMENT_PREFIXES = ("#", "!", "//", ";")
 
 
-# ------------------------------------------------------------
-# cache handling
-# ------------------------------------------------------------
+# ---------------------------
+# Cache
+# ---------------------------
 
 def load_cache():
-    if Path(CACHE_FILE).exists():
-        return json.loads(Path(CACHE_FILE).read_text())
-    return {}
-
+    try:
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
 def save_cache(cache):
-    Path(CACHE_FILE).write_text(json.dumps(cache, indent=2))
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f)
 
 
-# ------------------------------------------------------------
-# hashing
-# ------------------------------------------------------------
+# ---------------------------
+# Normalization
+# ---------------------------
 
-def sha256(data):
-    return hashlib.sha256(data).hexdigest()
+def normalize(domain: str) -> str:
+    d = domain.strip().lower()
 
+    if not d:
+        return ""
 
-# ------------------------------------------------------------
-# sources loading
-# ------------------------------------------------------------
+    # remove scheme
+    if d.startswith("http://") or d.startswith("https://"):
+        d = d.split("://", 1)[1]
 
-def load_sources():
-    if not Path(SOURCES_FILE).exists():
-        print("❌ sources.txt not found")
-        exit(1)
+    # remove path
+    d = d.split("/")[0].split("?")[0].split("#")[0]
 
-    sources = []
+    # remove port
+    if ":" in d:
+        d = d.split(":")[0]
 
-    for line in Path(SOURCES_FILE).read_text().splitlines():
-        line = line.strip()
+    # remove wildcard prefix
+    if d.startswith("*."):
+        d = d[2:]
 
-        if not line or line.startswith("#"):
-            continue
+    # reject wildcard entirely
+    if "*" in d:
+        return ""
 
-        sources.append(line)
+    # reject IP-prefixed garbage
+    if INVALID_PREFIX_RE.match(d):
+        return ""
 
-    return sources
+    # reject invalid characters
+    if not VALID_HOST_RE.fullmatch(d):
+        return ""
 
+    # reject illegal hostname forms
+    if (
+        d.startswith("-")
+        or d.endswith("-")
+        or ".." in d
+        or "." not in d
+    ):
+        return ""
 
-# ------------------------------------------------------------
-# download
-# ------------------------------------------------------------
-
-def download(url):
-
+    # normalize IDN
     try:
-        r = requests.get(url, headers=HEADERS, timeout=60)
-        r.raise_for_status()
-        return r.content
-    except Exception as e:
-        print(f"❌ Failed: {url} ({e})")
-        return None
+        d = idna.encode(d).decode("ascii")
+    except:
+        return ""
+
+    return d
 
 
-# ------------------------------------------------------------
-# domain cleaning
-# ------------------------------------------------------------
+# ---------------------------
+# Parsing
+# ---------------------------
 
-def extract_domain(line):
+def extract(line: str) -> str:
 
     line = line.strip()
 
-    if not line:
-        return None
+    if not line or line.startswith(COMMENT_PREFIXES):
+        return ""
 
-    if line.startswith("!"):
-        return None
+    # AdGuard format
+    m = ADB_RE.match(line)
+    if m:
+        return normalize(m.group(1))
 
-    if line.startswith("#"):
-        return None
+    # hosts format
+    m = HOSTS_RE.match(line)
+    if m:
+        return normalize(m.group(1))
 
-    # remove adguard syntax
-    line = line.replace("||", "")
-    line = line.replace("^", "")
-
-    # remove hosts prefixes
-    if line.startswith("0.0.0.0 "):
-        line = line[8:]
-
-    if line.startswith("127.0.0.1 "):
-        line = line[10:]
-
-    # remove wildcard prefix
-    if line.startswith("*."):
-        line = line[2:]
-
-    # reject wildcard anywhere
-    if "*" in line:
-        return None
-
-    # reject invalid prefixes
-    for prefix in INVALID_PREFIXES:
-        if line.startswith(prefix):
-            return None
-
-    # reject invalid chars
-    if any(c in line for c in INVALID_CHARS):
-        return None
-
-    line = line.lower().strip()
-
-    if not DOMAIN_REGEX.match(line):
-        return None
-
-    return line
+    # plain domain
+    return normalize(line.split()[0])
 
 
-# ------------------------------------------------------------
-# deduplication
-# ------------------------------------------------------------
+# ---------------------------
+# Deduplication (critical)
+# ---------------------------
 
-def deduplicate(domains):
+def dedupe(domains: Set[str]) -> Set[str]:
 
-    print("\n🧹 Deduplicating safely...")
+    print("🧹 Deduplicating safely...")
 
-    domains = sorted(domains)
-    final = set()
+    sorted_domains = sorted(domains, key=lambda d: d.count("."))
 
-    for domain in domains:
+    kept = set()
 
-        parts = domain.split(".")
+    for d in sorted_domains:
+
         redundant = False
 
-        for i in range(1, len(parts)):
-            parent = ".".join(parts[i:])
-            if parent in final:
+        for parent in kept:
+            if d == parent or d.endswith("." + parent):
                 redundant = True
                 break
 
         if not redundant:
-            final.add(domain)
+            kept.add(d)
 
-    print(f"🧠 Final domains: {len(final)}")
-
-    return sorted(final)
+    return kept
 
 
-# ------------------------------------------------------------
-# main
-# ------------------------------------------------------------
+# ---------------------------
+# Fetch
+# ---------------------------
 
-def main():
+def fetch(url: str, cache: Dict) -> Set[str]:
 
-    print("🚀 royerlraph79 AdGuard Blocklist generator\n")
+    headers = {"User-Agent": USER_AGENT}
 
-    cache = load_cache()
-    new_cache = {}
+    try:
+        r = requests.get(url, headers=headers, timeout=60)
+        r.raise_for_status()
+        text = r.text
 
-    sources = load_sources()
+    except Exception as e:
+        print("❌", url, e)
+        return set()
 
-    all_domains = set()
+    new_hash = hash(text)
 
-    for url in sources:
+    if cache.get(url) == new_hash:
+        print("⏭️ Unchanged:", url)
+        return set()
 
-        data = download(url)
+    print("⬇️ Updated:", url)
 
-        if not data:
-            continue
+    cache[url] = new_hash
 
-        digest = sha256(data)
+    found = set()
 
-        new_cache[url] = digest
+    for line in text.splitlines():
+        d = extract(line)
+        if d:
+            found.add(d)
 
-        if cache.get(url) == digest:
-            print(f"⏭️ Unchanged: {url}")
-        else:
-            print(f"⬇️ Updated: {url}")
+    return found
 
-        text = data.decode("utf-8", errors="ignore")
 
-        for line in text.splitlines():
+# ---------------------------
+# Write
+# ---------------------------
 
-            domain = extract_domain(line)
-
-            if domain:
-                all_domains.add(domain)
-
-    print(f"\n🧠 Raw domains: {len(all_domains)}")
-
-    domains = deduplicate(all_domains)
-
-    # ------------------------------------------------------------
-    # write output
-    # ------------------------------------------------------------
+def write(domains: Set[str]):
 
     with open(OUTPUT_FILE, "w") as f:
 
@@ -228,15 +203,44 @@ def main():
         f.write(f"! Generated: {time.ctime()}\n")
         f.write(f"! Domains: {len(domains)}\n\n")
 
-        for d in domains:
+        for d in sorted(domains):
             f.write(f"||{d}^\n")
 
-    save_cache(new_cache)
+
+# ---------------------------
+# Main
+# ---------------------------
+
+def main():
+
+    print("🚀 royerlraph79 AdGuard Blocklist generator\n")
+
+    cache = load_cache()
+
+    with open(SOURCE_FILE) as f:
+        sources = [
+            s.strip()
+            for s in f
+            if s.strip() and not s.strip().startswith("#")
+        ]
+
+    all_domains = set()
+
+    for url in sources:
+        all_domains |= fetch(url, cache)
+
+    print("\n🧠 Raw domains:", len(all_domains))
+
+    clean = dedupe(all_domains)
+
+    print("🧠 Final domains:", len(clean))
+
+    write(clean)
+
+    save_cache(cache)
 
     print("\n🏁 Done.")
 
-
-# ------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
