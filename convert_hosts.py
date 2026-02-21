@@ -3,21 +3,21 @@ import json
 import time
 import requests
 import idna
-from typing import Set, Dict
+import sys
 
 SOURCE_FILE = "sources.txt"
 OUTPUT_FILE = "adguard_blocklist.txt"
 CACHE_FILE = "cache.json"
 
-USER_AGENT = "royerlraph79-blocklist-generator/1.0"
+USER_AGENT = "royerlraph79-blocklist-generator/2.0"
 
-# Reject invalid prefixes
+COMMENT_PREFIXES = ("#", "!", "//", ";")
+
 INVALID_PREFIX_RE = re.compile(
     r"^(?:0\.0\.0\.0|127\.0\.0\.1|::1)\.",
     re.IGNORECASE,
 )
 
-# Reject illegal hostname chars
 VALID_HOST_RE = re.compile(r"^[a-z0-9.-]+$")
 
 HOSTS_RE = re.compile(
@@ -27,63 +27,54 @@ HOSTS_RE = re.compile(
 
 ADB_RE = re.compile(r"^\|\|([^\^/]+)")
 
-COMMENT_PREFIXES = ("#", "!", "//", ";")
-
 
 # ---------------------------
 # Cache
 # ---------------------------
 
 def load_cache():
+
     try:
         with open(CACHE_FILE, "r") as f:
             return json.load(f)
     except:
         return {}
 
+
 def save_cache(cache):
+
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f)
 
 
 # ---------------------------
-# Normalization
+# Normalize domain safely
 # ---------------------------
 
-def normalize(domain: str) -> str:
+def normalize(domain):
+
     d = domain.strip().lower()
 
     if not d:
         return ""
 
-    # remove scheme
     if d.startswith("http://") or d.startswith("https://"):
         d = d.split("://", 1)[1]
 
-    # remove path
     d = d.split("/")[0].split("?")[0].split("#")[0]
 
-    # remove port
     if ":" in d:
         d = d.split(":")[0]
 
-    # remove wildcard prefix
     if d.startswith("*."):
         d = d[2:]
 
-    # reject wildcard entirely
     if "*" in d:
         return ""
 
-    # reject IP-prefixed garbage
     if INVALID_PREFIX_RE.match(d):
         return ""
 
-    # reject invalid characters
-    if not VALID_HOST_RE.fullmatch(d):
-        return ""
-
-    # reject illegal hostname forms
     if (
         d.startswith("-")
         or d.endswith("-")
@@ -92,7 +83,9 @@ def normalize(domain: str) -> str:
     ):
         return ""
 
-    # normalize IDN
+    if not VALID_HOST_RE.fullmatch(d):
+        return ""
+
     try:
         d = idna.encode(d).decode("ascii")
     except:
@@ -102,99 +95,124 @@ def normalize(domain: str) -> str:
 
 
 # ---------------------------
-# Parsing
+# Extract domain
 # ---------------------------
 
-def extract(line: str) -> str:
+def extract(line):
 
     line = line.strip()
 
     if not line or line.startswith(COMMENT_PREFIXES):
         return ""
 
-    # AdGuard format
     m = ADB_RE.match(line)
     if m:
         return normalize(m.group(1))
 
-    # hosts format
     m = HOSTS_RE.match(line)
     if m:
         return normalize(m.group(1))
 
-    # plain domain
     return normalize(line.split()[0])
 
 
 # ---------------------------
-# Deduplication (critical)
+# FAST DEDUPE (O(n log n))
 # ---------------------------
 
-def dedupe(domains: Set[str]) -> Set[str]:
+def dedupe(domains):
 
-    print("🧹 Deduplicating safely...")
+    print("🧹 Deduplicating efficiently...", flush=True)
 
-    sorted_domains = sorted(domains, key=lambda d: d.count("."))
+    domains_sorted = sorted(domains)
 
     kept = set()
 
-    for d in sorted_domains:
+    suffix_tree = {}
 
+    total = len(domains_sorted)
+
+    for i, domain in enumerate(domains_sorted, 1):
+
+        parts = domain.split(".")[::-1]
+
+        node = suffix_tree
         redundant = False
 
-        for parent in kept:
-            if d == parent or d.endswith("." + parent):
+        for part in parts:
+
+            if "_end_" in node:
                 redundant = True
                 break
 
+            if part not in node:
+                node[part] = {}
+
+            node = node[part]
+
         if not redundant:
-            kept.add(d)
+            node["_end_"] = True
+            kept.add(domain)
+
+        if i % 50000 == 0:
+            print(f"   {i}/{total} processed", flush=True)
+
+    print("✅ Deduplication complete", flush=True)
 
     return kept
 
 
 # ---------------------------
-# Fetch
+# Fetch source
 # ---------------------------
 
-def fetch(url: str, cache: Dict) -> Set[str]:
+def fetch(url, cache):
 
     headers = {"User-Agent": USER_AGENT}
 
     try:
+
         r = requests.get(url, headers=headers, timeout=60)
         r.raise_for_status()
         text = r.text
 
     except Exception as e:
-        print("❌", url, e)
+
+        print("❌ Fetch failed:", url, e, flush=True)
         return set()
 
     new_hash = hash(text)
 
     if cache.get(url) == new_hash:
-        print("⏭️ Unchanged:", url)
+
+        print("⏭️ Unchanged:", url, flush=True)
         return set()
 
-    print("⬇️ Updated:", url)
-
     cache[url] = new_hash
+
+    print("⬇️ Processing:", url, flush=True)
 
     found = set()
 
     for line in text.splitlines():
+
         d = extract(line)
+
         if d:
             found.add(d)
+
+    print(f"   {len(found)} domains extracted", flush=True)
 
     return found
 
 
 # ---------------------------
-# Write
+# Write blocklist
 # ---------------------------
 
-def write(domains: Set[str]):
+def write(domains):
+
+    print("💾 Writing blocklist...", flush=True)
 
     with open(OUTPUT_FILE, "w") as f:
 
@@ -203,8 +221,14 @@ def write(domains: Set[str]):
         f.write(f"! Generated: {time.ctime()}\n")
         f.write(f"! Domains: {len(domains)}\n\n")
 
-        for d in sorted(domains):
+        for i, d in enumerate(sorted(domains), 1):
+
             f.write(f"||{d}^\n")
+
+            if i % 100000 == 0:
+                print(f"   {i} written", flush=True)
+
+    print("✅ Write complete", flush=True)
 
 
 # ---------------------------
@@ -213,11 +237,12 @@ def write(domains: Set[str]):
 
 def main():
 
-    print("🚀 royerlraph79 AdGuard Blocklist generator\n")
+    print("\n🚀 royerlraph79 AdGuard Blocklist Generator\n", flush=True)
 
     cache = load_cache()
 
     with open(SOURCE_FILE) as f:
+
         sources = [
             s.strip()
             for s in f
@@ -226,20 +251,29 @@ def main():
 
     all_domains = set()
 
-    for url in sources:
-        all_domains |= fetch(url, cache)
+    total_sources = len(sources)
 
-    print("\n🧠 Raw domains:", len(all_domains))
+    for i, url in enumerate(sources, 1):
+
+        print(f"\n🌐 Source {i}/{total_sources}", flush=True)
+
+        domains = fetch(url, cache)
+
+        all_domains |= domains
+
+        print(f"   Total collected: {len(all_domains)}", flush=True)
+
+    print("\n🧠 Raw domains:", len(all_domains), flush=True)
 
     clean = dedupe(all_domains)
 
-    print("🧠 Final domains:", len(clean))
+    print("🧠 Final domains:", len(clean), flush=True)
 
     write(clean)
 
     save_cache(cache)
 
-    print("\n🏁 Done.")
+    print("\n🏁 Done.\n", flush=True)
 
 
 if __name__ == "__main__":
