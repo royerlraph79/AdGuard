@@ -1,258 +1,242 @@
-import re
+#!/usr/bin/env python3
+# royerlraph79 AdGuard Blocklist generator
+# Optimized for AdGuard iOS DNS-level blocking
+
 import requests
+import re
+import json
+import hashlib
+import time
+from pathlib import Path
 
-SOURCE_FILE = "sources.txt"
-
+CACHE_FILE = "cache.json"
 OUTPUT_FILE = "adguard_blocklist.txt"
-OUTPUT_MOBILE_FILE = "adguard_blocklist_mobile.txt"
+SOURCES_FILE = "sources.txt"
 
-USER_AGENT = "royerlraph79-AdGuard-Blocklist/1.0"
-
-
-# ============================================================
-# STRICT DOMAIN VALIDATION
-# ============================================================
-
-LABEL_RE = re.compile(
-    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
-    re.IGNORECASE
+# strict domain validation
+DOMAIN_REGEX = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$"
 )
 
-TLD_RE = re.compile(
-    r"^[a-z]{2,63}$",
-    re.IGNORECASE
+INVALID_PREFIXES = (
+    "-",
+    ".",
+    "*",
 )
 
+INVALID_CHARS = set("* _ / : ? & = %")
 
-def is_valid_domain(domain: str) -> bool:
-
-    if "*" in domain:
-        return False
-
-    if domain.startswith("-"):
-        return False
-
-    if domain.endswith("-"):
-        return False
-
-    if len(domain) > 253:
-        return False
-
-    parts = domain.split(".")
-
-    if len(parts) < 2:
-        return False
-
-    for label in parts:
-
-        if not LABEL_RE.match(label):
-            return False
-
-    if not TLD_RE.match(parts[-1]):
-        return False
-
-    return True
+HEADERS = {
+    "User-Agent": "royerlraph79-adguard-blocklist-generator"
+}
 
 
-# ============================================================
-# EXTRACTION
-# ============================================================
+# ------------------------------------------------------------
+# cache handling
+# ------------------------------------------------------------
 
-def extract_domain(line: str) -> str:
+def load_cache():
+    if Path(CACHE_FILE).exists():
+        return json.loads(Path(CACHE_FILE).read_text())
+    return {}
+
+
+def save_cache(cache):
+    Path(CACHE_FILE).write_text(json.dumps(cache, indent=2))
+
+
+# ------------------------------------------------------------
+# hashing
+# ------------------------------------------------------------
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+# ------------------------------------------------------------
+# sources loading
+# ------------------------------------------------------------
+
+def load_sources():
+    if not Path(SOURCES_FILE).exists():
+        print("❌ sources.txt not found")
+        exit(1)
+
+    sources = []
+
+    for line in Path(SOURCES_FILE).read_text().splitlines():
+        line = line.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        sources.append(line)
+
+    return sources
+
+
+# ------------------------------------------------------------
+# download
+# ------------------------------------------------------------
+
+def download(url):
+
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=60)
+        r.raise_for_status()
+        return r.content
+    except Exception as e:
+        print(f"❌ Failed: {url} ({e})")
+        return None
+
+
+# ------------------------------------------------------------
+# domain cleaning
+# ------------------------------------------------------------
+
+def extract_domain(line):
 
     line = line.strip()
 
     if not line:
-        return ""
+        return None
 
-    if line.startswith(("!", "#", "@@")):
-        return ""
+    if line.startswith("!"):
+        return None
 
-    # AdGuard rule
-    if line.startswith("||"):
+    if line.startswith("#"):
+        return None
 
-        d = line[2:]
+    # remove adguard syntax
+    line = line.replace("||", "")
+    line = line.replace("^", "")
 
-        if "^" in d:
-            d = d.split("^", 1)[0]
+    # remove hosts prefixes
+    if line.startswith("0.0.0.0 "):
+        line = line[8:]
 
-    # hosts file
-    elif line.startswith(("0.0.0.0", "127.0.0.1", "::1")):
+    if line.startswith("127.0.0.1 "):
+        line = line[10:]
 
-        parts = line.split()
+    # remove wildcard prefix
+    if line.startswith("*."):
+        line = line[2:]
 
-        if len(parts) < 2:
-            return ""
+    # reject wildcard anywhere
+    if "*" in line:
+        return None
 
-        d = parts[1]
+    # reject invalid prefixes
+    for prefix in INVALID_PREFIXES:
+        if line.startswith(prefix):
+            return None
 
-    else:
+    # reject invalid chars
+    if any(c in line for c in INVALID_CHARS):
+        return None
 
-        d = line.split()[0]
+    line = line.lower().strip()
 
-    # remove scheme
-    if d.startswith("http://"):
-        d = d[7:]
+    if not DOMAIN_REGEX.match(line):
+        return None
 
-    if d.startswith("https://"):
-        d = d[8:]
-
-    # remove path
-    d = d.split("/")[0]
-
-    # remove port
-    d = d.split(":")[0]
-
-    d = d.strip(".")
-
-    return d.lower()
-
-
-# ============================================================
-# LOAD SOURCES
-# ============================================================
-
-def load_sources():
-
-    with open(SOURCE_FILE, encoding="utf-8") as f:
-
-        return [
-            line.strip()
-            for line in f
-            if line.strip() and not line.startswith("#")
-        ]
+    return line
 
 
-# ============================================================
-# FETCH
-# ============================================================
+# ------------------------------------------------------------
+# deduplication
+# ------------------------------------------------------------
 
-def fetch(url):
+def deduplicate(domains):
 
-    r = requests.get(
-        url,
-        headers={"User-Agent": USER_AGENT},
-        timeout=60
-    )
+    print("\n🧹 Deduplicating safely...")
 
-    r.raise_for_status()
+    domains = sorted(domains)
+    final = set()
 
-    return r.text
+    for domain in domains:
+
+        parts = domain.split(".")
+        redundant = False
+
+        for i in range(1, len(parts)):
+            parent = ".".join(parts[i:])
+            if parent in final:
+                redundant = True
+                break
+
+        if not redundant:
+            final.add(domain)
+
+    print(f"🧠 Final domains: {len(final)}")
+
+    return sorted(final)
 
 
-# ============================================================
-# BUILD DOMAIN SET
-# ============================================================
+# ------------------------------------------------------------
+# main
+# ------------------------------------------------------------
 
-def build_domains():
+def main():
 
-    domains = set()
+    print("🚀 royerlraph79 AdGuard Blocklist generator\n")
 
-    for url in load_sources():
+    cache = load_cache()
+    new_cache = {}
 
-        print("Fetching:", url)
+    sources = load_sources()
 
-        try:
+    all_domains = set()
 
-            text = fetch(url)
+    for url in sources:
 
-        except Exception as e:
+        data = download(url)
 
-            print("Error:", e)
+        if not data:
             continue
+
+        digest = sha256(data)
+
+        new_cache[url] = digest
+
+        if cache.get(url) == digest:
+            print(f"⏭️ Unchanged: {url}")
+        else:
+            print(f"⬇️ Updated: {url}")
+
+        text = data.decode("utf-8", errors="ignore")
 
         for line in text.splitlines():
 
             domain = extract_domain(line)
 
-            if not domain:
-                continue
+            if domain:
+                all_domains.add(domain)
 
-            if not is_valid_domain(domain):
-                continue
+    print(f"\n🧠 Raw domains: {len(all_domains)}")
 
-            domains.add(domain)
+    domains = deduplicate(all_domains)
 
-    print("Raw domains:", len(domains))
+    # ------------------------------------------------------------
+    # write output
+    # ------------------------------------------------------------
 
-    return domains
-
-
-# ============================================================
-# REMOVE REDUNDANT SUBDOMAINS
-# ============================================================
-
-def dedupe(domains):
-
-    domains = set(domains)
-
-    result = set()
-
-    for domain in sorted(domains):
-
-        parts = domain.split(".")
-
-        redundant = False
-
-        for i in range(1, len(parts)):
-
-            parent = ".".join(parts[i:])
-
-            if parent in domains:
-
-                redundant = True
-                break
-
-        if not redundant:
-            result.add(domain)
-
-    print("Final domains:", len(result))
-
-    return result
-
-
-# ============================================================
-# WRITE FILES
-# ============================================================
-
-def write_main(domains):
-
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    with open(OUTPUT_FILE, "w") as f:
 
         f.write("! Title: royerlraph79 AdGuard Blocklist\n")
-        f.write("! Expires: 24 hours\n\n")
+        f.write("! Expires: 24 hours\n")
+        f.write(f"! Generated: {time.ctime()}\n")
+        f.write(f"! Domains: {len(domains)}\n\n")
 
-        for d in sorted(domains):
+        for d in domains:
             f.write(f"||{d}^\n")
 
+    save_cache(new_cache)
 
-def write_mobile(domains):
-
-    with open(OUTPUT_MOBILE_FILE, "w", encoding="utf-8") as f:
-
-        f.write("! Title: royerlraph79 AdGuard Blocklist Mobile\n")
-        f.write("! Expires: 24 hours\n\n")
-
-        for d in sorted(domains):
-            f.write(f"||{d}^\n")
+    print("\n🏁 Done.")
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    domains = build_domains()
-
-    domains = dedupe(domains)
-
-    write_main(domains)
-
-    write_mobile(domains)
-
-    print("Done.")
-
+# ------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
