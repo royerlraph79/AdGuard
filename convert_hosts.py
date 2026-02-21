@@ -1,7 +1,11 @@
 import re
 import sys
+import json
+import hashlib
 import requests
 from typing import Set, Tuple, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
 
 # ---------------------------
 # Config
@@ -9,11 +13,9 @@ from typing import Set, Tuple, Dict
 
 SOURCE_FILE = "sources.txt"
 OUTPUT_FILE = "adguard_blocklist.txt"
+CACHE_FILE = "cache.json"
 
-# Optional toggles
-DEDUP_SUBDOMAINS = True                 # remove foo.bar.com if bar.com exists
-DEDUP_PLAIN_COVERED_BY_WILDCARDS = True # remove plain domains matched by wildcard patterns
-DEDUP_WILDCARDS_CONSERVATIVE = False    # optional conservative wildcard-vs-wildcard pruning
+MAX_WORKERS = 10
 
 COMMENT_PREFIXES = ("#", "!", "//", ";")
 
@@ -23,307 +25,349 @@ HOSTS_RE = re.compile(
 )
 
 SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
-TRAILING_OPTIONS_RE = re.compile(r"\$.*$")  # strip $options (cosmetic, etc.)
-
-DEFAULT_STATS = {
-    "total_lines": 0,
-    "adblock_rules": 0,
-    "hosts_rules": 0,
-    "plain_domains": 0,
-    "invalid_lines": 0,
-    "duplicates": 0,
-    "added": 0,
-    "skipped": 0,
-}
+TRAILING_OPTIONS_RE = re.compile(r"\$.*$")
 
 # ---------------------------
-# Parsing + normalization
+# HTTP session pooling
 # ---------------------------
 
-def is_comment_or_empty(line: str) -> bool:
+session = requests.Session()
+
+adapter = HTTPAdapter(
+    pool_connections=MAX_WORKERS,
+    pool_maxsize=MAX_WORKERS,
+)
+
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+
+session.headers.update({
+    "User-Agent": "blocklist-gen/2.0"
+})
+
+# ---------------------------
+# Cache handling
+# ---------------------------
+
+def load_cache():
+
+    try:
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def save_cache(cache):
+
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+
+
+# ---------------------------
+# Parsing
+# ---------------------------
+
+def is_comment_or_empty(line):
+
     ln = line.strip()
+
     return (not ln) or ln.startswith(COMMENT_PREFIXES)
 
-def normalize_token(token: str) -> str:
-    """
-    Normalize a hostname-like token or AdGuard host-pattern.
-    Keeps '*' intact.
-    Returns "" if it doesn't look like a domain/pattern.
-    """
+
+def normalize_token(token):
+
     d = token.strip().lower()
+
     if not d:
         return ""
 
-    # Remove scheme + path/query/fragment
     d = SCHEME_RE.sub("", d)
+
     d = d.split("/")[0].split("?")[0].split("#")[0]
 
-    # Remove port
     if ":" in d:
         d = d.split(":")[0]
 
-    # Strip leading "*."
     if d.startswith("*."):
         d = d[2:]
 
-    # Strip trailing delimiters often found in pasted rules
     d = d.rstrip(".^")
 
-    # Basic sanity
     if "." not in d:
         return ""
+
     if any(ch.isspace() for ch in d):
         return ""
 
     return d
 
-def extract_from_adblock_rule(line: str) -> str:
-    """
-    Extract host-pattern from AdGuard/uBO host rules.
-      ||example.com^$important -> example.com
-      ||device-metrics-*.amazon.com^ -> device-metrics-*.amazon.com
-      @@||example.com^ -> "" (ignore allowlist)
-    """
+
+def extract_from_adblock_rule(line):
+
     ln = line.strip()
+
     if ln.startswith("@@"):
         return ""
 
     ln = TRAILING_OPTIONS_RE.sub("", ln)
 
     m = re.match(r"^\|\|([^\^/]+)", ln)
+
     return m.group(1) if m else ""
 
-def choose_token(raw_line: str) -> Tuple[str, str]:
-    """
-    Return (kind, token) where kind in {"adblock","hosts","plain"}.
-    """
-    ln = raw_line.strip()
 
-    ad = extract_from_adblock_rule(ln)
+def choose_token(line):
+
+    ad = extract_from_adblock_rule(line)
+
     if ad:
-        return ("adblock", ad)
+        return ad
 
-    hm = HOSTS_RE.match(ln)
+    hm = HOSTS_RE.match(line)
+
     if hm:
-        return ("hosts", hm.group(1))
+        return hm.group(1)
 
-    token = ln.split()[0] if ln else ""
-    return ("plain", token)
+    if line:
+        return line.split()[0]
+
+    return ""
+
 
 # ---------------------------
-# Wildcard + subdomain dedupe
+# Wildcard logic
 # ---------------------------
 
-def glob_to_regex(glob: str) -> re.Pattern:
-    """
-    Convert a hostname glob with '*' into a safe regex matcher for full hostnames.
-    IMPORTANT: avoid backslash escapes like \\- so we avoid SyntaxWarning.
-    """
+def glob_to_regex(glob):
+
     esc = re.escape(glob.lower())
-    esc = esc.replace(r"\*", r"[a-z0-9.-]*")  # no backslashes needed
+
+    esc = esc.replace(r"\*", r"[a-z0-9][a-z0-9.-]*")
+
     return re.compile(rf"^{esc}$", re.IGNORECASE)
 
-def remove_plain_redundant_subdomains(plain: Set[str]) -> Set[str]:
-    """
-    Remove foo.bar.com if bar.com exists in the plain set.
-    """
-    kept = set()
-    for d in plain:
-        parts = d.split(".")
-        redundant = False
-        for i in range(1, len(parts)):
-            parent = ".".join(parts[i:])
-            if parent in plain:
-                redundant = True
-                break
-        if not redundant:
-            kept.add(d)
-    return kept
 
-def remove_plain_covered_by_wildcards(plain: Set[str], wildcards: Set[str]) -> Set[str]:
-    """
-    Remove plain domains that match any wildcard pattern already present.
-    Example: device-metrics-*.amazon.com covers device-metrics-us.amazon.com
-    """
+def remove_plain_covered_by_wildcards(plain, wildcards):
+
     if not wildcards:
         return plain
 
-    wildcard_res = [glob_to_regex(w) for w in wildcards]
-    out = set()
+    regexes = [glob_to_regex(w) for w in wildcards]
 
-    for d in plain:
-        covered = False
-        for rx in wildcard_res:
-            if rx.match(d):
-                covered = True
-                break
-        if not covered:
-            out.add(d)
+    return {
+        d for d in plain
+        if not any(rx.match(d) for rx in regexes)
+    }
 
-    return out
 
-def conservative_wildcard_prune(wildcards: Set[str]) -> Set[str]:
-    """
-    Optional conservative pruning:
-    If '*.example.com' exists, drop more specific patterns under that base
-    like 'foo*.example.com' or 'device-*.example.com' (since *.example.com covers all subdomains).
-    """
-    if not wildcards:
-        return wildcards
+def remove_wildcards_covered_by_base_domain(plain, wildcards):
 
-    super_wc_bases = set()
+    result = set()
+
     for w in wildcards:
-        wl = w.lower()
-        if wl.startswith("*.") and "." in wl[2:]:
-            super_wc_bases.add(wl[2:])
 
-    if not super_wc_bases:
-        return wildcards
+        parts = w.split(".")
 
-    pruned = set()
-    for w in wildcards:
-        wl = w.lower()
         redundant = False
-        for base in super_wc_bases:
-            if wl == "*." + base:
-                continue
-            if wl.endswith("." + base) and "." in wl[: -(len(base) + 1)]:
+
+        for i in range(len(parts)):
+
+            base = ".".join(parts[i:])
+
+            if base in plain:
+
                 redundant = True
                 break
+
         if not redundant:
-            pruned.add(w)
+            result.add(w)
 
-    return pruned
-
-def dedupe_domains(domains: Set[str]) -> Set[str]:
-    print("🧹 Deduplicating domains (subdomains + wildcards)...")
-    sys.stdout.flush()
-
-    domain_set = set(domains)
-    wildcards = {d for d in domain_set if "*" in d}
-    plain = {d for d in domain_set if "*" not in d}
-
-    if DEDUP_SUBDOMAINS:
-        plain = remove_plain_redundant_subdomains(plain)
-
-    if DEDUP_PLAIN_COVERED_BY_WILDCARDS:
-        plain = remove_plain_covered_by_wildcards(plain, wildcards)
-
-    if DEDUP_WILDCARDS_CONSERVATIVE:
-        wildcards = conservative_wildcard_prune(wildcards)
-
-    result = plain | wildcards
-
-    print("✅ Deduplication complete.")
-    sys.stdout.flush()
     return result
 
+
 # ---------------------------
-# Fetch + aggregate
+# Trie redundancy removal (DNS SAFE)
 # ---------------------------
 
-def load_domains_from_url(url: str, seen: Set[str]) -> Tuple[Set[str], Dict[str, int]]:
-    print(f"\n🔗 Fetching: {url}")
-    sys.stdout.flush()
+class TrieNode:
 
-    stats = DEFAULT_STATS.copy()
-    found: Set[str] = set()
+    __slots__ = ("children", "block")
+
+    def __init__(self):
+
+        self.children = {}
+        self.block = False
+
+
+def remove_redundant_subdomains(domains):
+
+    root = TrieNode()
+
+    result = set()
+
+    for domain in sorted(domains, key=lambda d: d.count(".")):
+
+        node = root
+
+        parts = domain.split(".")
+
+        redundant = False
+
+        for part in reversed(parts):
+
+            if node.block:
+
+                redundant = True
+                break
+
+            node = node.children.setdefault(part, TrieNode())
+
+        if not redundant:
+
+            node.block = True
+
+            result.add(domain)
+
+    return result
+
+
+def dedupe_domains(domains):
+
+    print("🧹 Deduplicating safely for DNS...")
+
+    plain = {d for d in domains if "*" not in d}
+
+    wildcards = {d for d in domains if "*" in d}
+
+    plain = remove_redundant_subdomains(plain)
+
+    wildcards = remove_wildcards_covered_by_base_domain(
+        plain,
+        wildcards
+    )
+
+    plain = remove_plain_covered_by_wildcards(
+        plain,
+        wildcards
+    )
+
+    return plain | wildcards
+
+
+# ---------------------------
+# Fetch with incremental support
+# ---------------------------
+
+def fetch_source(url, cache):
+
+    headers = {}
+
+    if url in cache:
+
+        if "etag" in cache[url]:
+            headers["If-None-Match"] = cache[url]["etag"]
+
+        if "last_modified" in cache[url]:
+            headers["If-Modified-Since"] = cache[url]["last_modified"]
 
     try:
-        r = requests.get(
-            url,
-            timeout=30,
-            headers={"User-Agent": "blocklist-gen/1.0 (+https://github.com/royerlraph79/AdGuard)"}
-        )
+
+        r = session.get(url, headers=headers, timeout=30)
+
+        if r.status_code == 304:
+
+            print(f"⚡ Unchanged: {url}")
+
+            return set(cache[url]["domains"])
+
         r.raise_for_status()
-        text = r.text
+
+        domains = set()
+
+        for raw in r.text.splitlines():
+
+            if is_comment_or_empty(raw):
+                continue
+
+            token = choose_token(raw)
+
+            domain = normalize_token(token)
+
+            if domain:
+                domains.add(domain)
+
+        cache[url] = {
+
+            "etag": r.headers.get("ETag"),
+
+            "last_modified": r.headers.get("Last-Modified"),
+
+            "domains": list(domains)
+        }
+
+        print(f"🔄 Updated: {url}")
+
+        return domains
+
     except Exception as e:
-        print(f"❌ Error fetching {url}: {e}")
-        sys.stdout.flush()
-        return found, stats
 
-    for raw in text.splitlines():
-        stats["total_lines"] += 1
-        ln = raw.strip()
+        print(f"❌ Failed: {url} → {e}")
 
-        if is_comment_or_empty(ln):
-            stats["invalid_lines"] += 1
-            continue
+        if url in cache:
+            return set(cache[url]["domains"])
 
-        kind, token = choose_token(ln)
-        if kind == "adblock":
-            stats["adblock_rules"] += 1
-        elif kind == "hosts":
-            stats["hosts_rules"] += 1
-        else:
-            stats["plain_domains"] += 1
+        return set()
 
-        domain = normalize_token(token)
-        if not domain:
-            stats["invalid_lines"] += 1
-            continue
-
-        if domain in seen:
-            stats["duplicates"] += 1
-            continue
-
-        seen.add(domain)
-        found.add(domain)
-        stats["added"] += 1
-
-    stats["skipped"] = stats["invalid_lines"] + stats["duplicates"]
-    return found, stats
 
 # ---------------------------
 # Main
 # ---------------------------
 
 def main():
-    print("🚀 Starting blocklist generation...")
-    sys.stdout.flush()
 
-    with open(SOURCE_FILE, "r", encoding="utf-8") as f:
-        urls = [l.strip() for l in f if not is_comment_or_empty(l)]
+    print("🚀 Blocklist generator with incremental updates\n")
 
-    all_domains: Set[str] = set()
+    cache = load_cache()
 
-    overall = DEFAULT_STATS.copy()
-    overall["sources"] = 0
-    overall["parsed_total"] = 0
+    with open(SOURCE_FILE) as f:
 
-    for url in urls:
-        domains, stats = load_domains_from_url(url, all_domains)
+        urls = [
+            l.strip()
+            for l in f
+            if not is_comment_or_empty(l)
+        ]
 
-        overall["sources"] += 1
-        overall["parsed_total"] += stats["total_lines"]
-        for k in DEFAULT_STATS:
-            overall[k] += stats[k]
+    all_domains = set()
 
-        print(f"📊 {url}")
-        print(
-            f"  Lines: {stats['total_lines']} | Added: {stats['added']} | "
-            f"Skipped: {stats['skipped']} | Duplicates: {stats['duplicates']} | Invalid: {stats['invalid_lines']}"
-        )
-        sys.stdout.flush()
+    with ThreadPoolExecutor(MAX_WORKERS) as executor:
 
-    print(f"\n🧠 Raw unique entries: {len(all_domains)}")
-    sys.stdout.flush()
+        futures = {
+            executor.submit(fetch_source, url, cache): url
+            for url in urls
+        }
 
-    final_domains = dedupe_domains(all_domains)
+        for future in as_completed(futures):
 
-    print(f"🧠 Final entries: {len(final_domains)}")
-    print(f"📦 Writing: {OUTPUT_FILE}")
-    sys.stdout.flush()
+            domains = future.result()
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for i, d in enumerate(sorted(final_domains), 1):
+            all_domains.update(domains)
+
+    print(f"\n🧠 Raw domains: {len(all_domains)}")
+
+    final = dedupe_domains(all_domains)
+
+    print(f"🧠 Final domains: {len(final)}")
+
+    with open(OUTPUT_FILE, "w") as f:
+
+        for d in sorted(final):
             f.write(f"||{d}^\n")
-            if i % 20000 == 0:
-                print(f"  ... wrote {i}")
-                sys.stdout.flush()
 
-    print("🏁 Done.")
-    sys.stdout.flush()
+    save_cache(cache)
+
+    print("\n🏁 Done.")
+
 
 if __name__ == "__main__":
     main()
