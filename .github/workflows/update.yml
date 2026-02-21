@@ -14,7 +14,6 @@ jobs:
     timeout-minutes: 15
 
     steps:
-
       - name: ⬇️ Checkout repository
         uses: actions/checkout@v4
 
@@ -36,23 +35,32 @@ jobs:
 
       - name: 👀 Preview output
         run: |
-          echo "== Preview =="
-          head -n 20 adguard_blocklist.txt
+          echo "== Desktop preview =="
+          head -n 10 adguard_blocklist.txt || true
+
+          echo "== Mobile preview =="
+          head -n 10 adguard_blocklist_mobile.txt || true
+
           RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
-          echo "Rule count: $RULES"
-          echo "### Rule count: $RULES" >> "$GITHUB_STEP_SUMMARY"
+          MOBILE_RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist_mobile.txt | wc -l || true)
+
+          echo "Desktop rule count: $RULES"
+          echo "Mobile rule count: $MOBILE_RULES"
+
+          echo "### Desktop rules: $RULES" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Mobile rules: $MOBILE_RULES" >> "$GITHUB_STEP_SUMMARY"
 
       - name: ✅ Check for changes
         id: git-check
         run: |
-          if git diff --quiet adguard_blocklist.txt cache.json; then
+          if git diff --quiet adguard_blocklist.txt adguard_blocklist_mobile.txt cache.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changes detected."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Changes detected."
             git status --porcelain
-            git diff --stat adguard_blocklist.txt cache.json
+            git diff --stat adguard_blocklist.txt adguard_blocklist_mobile.txt cache.json || true
           fi
 
       - name: 📤 Commit and push changes
@@ -60,6 +68,10 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add adguard_blocklist.txt cache.json
+
+          git add adguard_blocklist.txt
+          git add adguard_blocklist_mobile.txt
+          git add cache.json
+
           git commit -m "🔄 Auto-update blocklist [skip ci]"
           git push
