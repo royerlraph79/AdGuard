@@ -6,14 +6,15 @@ on:
     - cron: "0 0 * * *"  # Every 24 hours
 
 permissions:
-  contents: write  # allow git push with GITHUB_TOKEN
+  contents: write
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # ⛔ HARD STOP if anything hangs
+    timeout-minutes: 15
 
     steps:
+
       - name: ⬇️ Checkout repository
         uses: actions/checkout@v4
 
@@ -44,14 +45,14 @@ jobs:
       - name: ✅ Check for changes
         id: git-check
         run: |
-          if git diff --quiet adguard_blocklist.txt; then
+          if git diff --quiet adguard_blocklist.txt cache.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changes detected."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Changes detected."
             git status --porcelain
-            git diff --stat adguard_blocklist.txt
+            git diff --stat adguard_blocklist.txt cache.json
           fi
 
       - name: 📤 Commit and push changes
@@ -59,6 +60,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add adguard_blocklist.txt
+          git add adguard_blocklist.txt cache.json
           git commit -m "🔄 Auto-update blocklist [skip ci]"
           git push
