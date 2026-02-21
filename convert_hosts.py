@@ -1,26 +1,16 @@
 import re
-import json
 import requests
-from typing import Set, Dict
-
-# ============================================================
-# CONFIG
-# ============================================================
 
 SOURCE_FILE = "sources.txt"
 
 OUTPUT_FILE = "adguard_blocklist.txt"
 OUTPUT_MOBILE_FILE = "adguard_blocklist_mobile.txt"
 
-CACHE_FILE = "cache.json"
-
 USER_AGENT = "royerlraph79-AdGuard-Blocklist/1.0"
-
-COMMENT_PREFIXES = ("#", "!", "//", ";")
 
 
 # ============================================================
-# STRICT DNS VALIDATION
+# STRICT DOMAIN VALIDATION
 # ============================================================
 
 LABEL_RE = re.compile(
@@ -33,23 +23,17 @@ TLD_RE = re.compile(
     re.IGNORECASE
 )
 
-SCHEME_RE = re.compile(
-    r"^https?://",
-    re.IGNORECASE
-)
-
-HOSTS_RE = re.compile(
-    r"^\s*(?:0\.0\.0\.0|127\.0\.0\.1|::1)\s+([^\s#]+)",
-    re.IGNORECASE
-)
-
-ADB_RULE_RE = re.compile(
-    r"^\|\|([^\^/]+)\^",
-    re.IGNORECASE
-)
-
 
 def is_valid_domain(domain: str) -> bool:
+
+    if "*" in domain:
+        return False
+
+    if domain.startswith("-"):
+        return False
+
+    if domain.endswith("-"):
+        return False
 
     if len(domain) > 253:
         return False
@@ -60,6 +44,7 @@ def is_valid_domain(domain: str) -> bool:
         return False
 
     for label in parts:
+
         if not LABEL_RE.match(label):
             return False
 
@@ -70,77 +55,57 @@ def is_valid_domain(domain: str) -> bool:
 
 
 # ============================================================
-# DOMAIN NORMALIZATION
+# EXTRACTION
 # ============================================================
-
-def normalize_domain(token: str) -> str:
-
-    d = token.strip().lower()
-
-    if not d:
-        return ""
-
-    d = SCHEME_RE.sub("", d)
-
-    d = d.split("/")[0]
-    d = d.split("?")[0]
-    d = d.split("#")[0]
-    d = d.split(":")[0]
-
-    d = d.strip(".^")
-
-    # reject ALL wildcards (useless in DNS if root exists)
-    if "*" in d:
-        return ""
-
-    if not is_valid_domain(d):
-        return ""
-
-    return d
-
-
-# ============================================================
-# PARSING
-# ============================================================
-
-def is_comment(line: str) -> bool:
-
-    s = line.strip()
-
-    return not s or s.startswith(COMMENT_PREFIXES)
-
 
 def extract_domain(line: str) -> str:
 
-    if line.startswith("@@"):
+    line = line.strip()
+
+    if not line:
         return ""
 
-    m = ADB_RULE_RE.match(line)
-    if m:
-        return m.group(1)
+    if line.startswith(("!", "#", "@@")):
+        return ""
 
-    m = HOSTS_RE.match(line)
-    if m:
-        return m.group(1)
+    # AdGuard rule
+    if line.startswith("||"):
 
-    return line.split()[0]
+        d = line[2:]
 
+        if "^" in d:
+            d = d.split("^", 1)[0]
 
-# ============================================================
-# FETCH
-# ============================================================
+    # hosts file
+    elif line.startswith(("0.0.0.0", "127.0.0.1", "::1")):
 
-def fetch(url: str) -> str:
+        parts = line.split()
 
-    r = requests.get(
-        url,
-        timeout=60,
-        headers={"User-Agent": USER_AGENT}
-    )
+        if len(parts) < 2:
+            return ""
 
-    r.raise_for_status()
+        d = parts[1]
 
-    return r.text
+    else:
+
+        d = line.split()[0]
+
+    # remove scheme
+    if d.startswith("http://"):
+        d = d[7:]
+
+    if d.startswith("https://"):
+        d = d[8:]
+
+    # remove path
+    d = d.split("/")[0]
+
+    # remove port
+    d = d.split(":")[0]
+
+    d = d.strip(".")
+
+    return d.lower()
 
 
 # ============================================================
@@ -154,72 +119,76 @@ def load_sources():
         return [
             line.strip()
             for line in f
-            if not is_comment(line)
+            if line.strip() and not line.startswith("#")
         ]
+
+
+# ============================================================
+# FETCH
+# ============================================================
+
+def fetch(url):
+
+    r = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=60
+    )
+
+    r.raise_for_status()
+
+    return r.text
 
 
 # ============================================================
 # BUILD DOMAIN SET
 # ============================================================
 
-def build_domains() -> Set[str]:
-
-    print("🚀 Generating royerlraph79 AdGuard Blocklist")
+def build_domains():
 
     domains = set()
 
-    sources = load_sources()
+    for url in load_sources():
 
-    for url in sources:
+        print("Fetching:", url)
 
         try:
 
-            print(f"🔗 Fetching: {url}")
-
             text = fetch(url)
-
-            added = 0
-
-            for line in text.splitlines():
-
-                if is_comment(line):
-                    continue
-
-                raw = extract_domain(line)
-
-                domain = normalize_domain(raw)
-
-                if not domain:
-                    continue
-
-                domains.add(domain)
-
-                added += 1
-
-            print(f"   Added: {added}")
 
         except Exception as e:
 
-            print(f"❌ Error: {url} → {e}")
+            print("Error:", e)
+            continue
 
-    print(f"🧠 Raw domains: {len(domains)}")
+        for line in text.splitlines():
+
+            domain = extract_domain(line)
+
+            if not domain:
+                continue
+
+            if not is_valid_domain(domain):
+                continue
+
+            domains.add(domain)
+
+    print("Raw domains:", len(domains))
 
     return domains
 
 
 # ============================================================
-# ROOT DOMAIN DEDUPLICATION
+# REMOVE REDUNDANT SUBDOMAINS
 # ============================================================
 
-def dedupe_domains(domains: Set[str]) -> Set[str]:
+def dedupe(domains):
 
-    print("🧹 Removing redundant subdomains")
-
-    domain_set = set(domains)
+    domains = set(domains)
 
     result = set()
 
-    for domain in sorted(domain_set):
+    for domain in sorted(domains):
 
         parts = domain.split(".")
 
@@ -229,14 +198,15 @@ def dedupe_domains(domains: Set[str]) -> Set[str]:
 
             parent = ".".join(parts[i:])
 
-            if parent in domain_set:
+            if parent in domains:
+
                 redundant = True
                 break
 
         if not redundant:
             result.add(domain)
 
-    print(f"🧠 Final domains: {len(result)}")
+    print("Final domains:", len(result))
 
     return result
 
@@ -245,38 +215,25 @@ def dedupe_domains(domains: Set[str]) -> Set[str]:
 # WRITE FILES
 # ============================================================
 
-MAIN_HEADER = """! Title: royerlraph79 AdGuard Blocklist
-! Expires: 24 hours
-
-"""
-
-MOBILE_HEADER = """! Title: royerlraph79 AdGuard Blocklist Mobile
-! Expires: 24 hours
-
-"""
-
-
-def write_main(domains: Set[str]):
+def write_main(domains):
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
 
-        f.write(MAIN_HEADER)
+        f.write("! Title: royerlraph79 AdGuard Blocklist\n")
+        f.write("! Expires: 24 hours\n\n")
 
         for d in sorted(domains):
             f.write(f"||{d}^\n")
 
 
-def write_mobile(domains: Set[str]):
-
-    mobile = set(domains)
-
-    print(f"📱 Mobile domains: {len(mobile)}")
+def write_mobile(domains):
 
     with open(OUTPUT_MOBILE_FILE, "w", encoding="utf-8") as f:
 
-        f.write(MOBILE_HEADER)
+        f.write("! Title: royerlraph79 AdGuard Blocklist Mobile\n")
+        f.write("! Expires: 24 hours\n\n")
 
-        for d in sorted(mobile):
+        for d in sorted(domains):
             f.write(f"||{d}^\n")
 
 
@@ -288,13 +245,13 @@ def main():
 
     domains = build_domains()
 
-    domains = dedupe_domains(domains)
+    domains = dedupe(domains)
 
     write_main(domains)
 
     write_mobile(domains)
 
-    print("🏁 Done")
+    print("Done.")
 
 
 if __name__ == "__main__":
