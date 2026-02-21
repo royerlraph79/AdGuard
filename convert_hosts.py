@@ -1,9 +1,8 @@
 import re
 import sys
 import json
-import hashlib
 import requests
-from typing import Set, Tuple, Dict
+from typing import Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 
@@ -42,11 +41,11 @@ session.mount("http://", adapter)
 session.mount("https://", adapter)
 
 session.headers.update({
-    "User-Agent": "blocklist-gen/2.0"
+    "User-Agent": "blocklist-gen/3.0"
 })
 
 # ---------------------------
-# Cache handling
+# Cache
 # ---------------------------
 
 def load_cache():
@@ -57,12 +56,10 @@ def load_cache():
     except:
         return {}
 
-
 def save_cache(cache):
 
     with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f, indent=2)
-
+        json.dump(cache, f)
 
 # ---------------------------
 # Parsing
@@ -105,12 +102,10 @@ def normalize_token(token):
 
 def extract_from_adblock_rule(line):
 
-    ln = line.strip()
-
-    if ln.startswith("@@"):
+    if line.startswith("@@"):
         return ""
 
-    ln = TRAILING_OPTIONS_RE.sub("", ln)
+    ln = TRAILING_OPTIONS_RE.sub("", line)
 
     m = re.match(r"^\|\|([^\^/]+)", ln)
 
@@ -134,9 +129,8 @@ def choose_token(line):
 
     return ""
 
-
 # ---------------------------
-# Wildcard logic
+# Wildcard handling
 # ---------------------------
 
 def glob_to_regex(glob):
@@ -185,9 +179,8 @@ def remove_wildcards_covered_by_base_domain(plain, wildcards):
 
     return result
 
-
 # ---------------------------
-# Trie redundancy removal (DNS SAFE)
+# Trie dedupe (DNS-safe)
 # ---------------------------
 
 class TrieNode:
@@ -206,7 +199,8 @@ def remove_redundant_subdomains(domains):
 
     result = set()
 
-    for domain in sorted(domains, key=lambda d: d.count(".")):
+    # shortest first ensures parent inserted first
+    for domain in sorted(domains, key=lambda d: (d.count("."), len(d))):
 
         node = root
 
@@ -231,13 +225,15 @@ def remove_redundant_subdomains(domains):
 
     return result
 
+# ---------------------------
+# Combined dedupe
+# ---------------------------
 
 def dedupe_domains(domains):
 
     print("🧹 Deduplicating safely for DNS...")
 
     plain = {d for d in domains if "*" not in d}
-
     wildcards = {d for d in domains if "*" in d}
 
     plain = remove_redundant_subdomains(plain)
@@ -252,11 +248,14 @@ def dedupe_domains(domains):
         wildcards
     )
 
-    return plain | wildcards
+    final = plain | wildcards
 
+    print(f"Removed {len(domains) - len(final)} redundant domains")
+
+    return final
 
 # ---------------------------
-# Fetch with incremental support
+# Fetch with incremental update
 # ---------------------------
 
 def fetch_source(url, cache):
@@ -265,10 +264,10 @@ def fetch_source(url, cache):
 
     if url in cache:
 
-        if "etag" in cache[url]:
+        if cache[url].get("etag"):
             headers["If-None-Match"] = cache[url]["etag"]
 
-        if "last_modified" in cache[url]:
+        if cache[url].get("last_modified"):
             headers["If-Modified-Since"] = cache[url]["last_modified"]
 
     try:
@@ -294,7 +293,7 @@ def fetch_source(url, cache):
 
             domain = normalize_token(token)
 
-            if domain:
+            if domain and domain.count(".") >= 1:
                 domains.add(domain)
 
         cache[url] = {
@@ -306,7 +305,7 @@ def fetch_source(url, cache):
             "domains": list(domains)
         }
 
-        print(f"🔄 Updated: {url}")
+        print(f"🔄 Updated: {url} (+{len(domains)})")
 
         return domains
 
@@ -318,7 +317,6 @@ def fetch_source(url, cache):
             return set(cache[url]["domains"])
 
         return set()
-
 
 # ---------------------------
 # Main
@@ -349,9 +347,7 @@ def main():
 
         for future in as_completed(futures):
 
-            domains = future.result()
-
-            all_domains.update(domains)
+            all_domains.update(future.result())
 
     print(f"\n🧠 Raw domains: {len(all_domains)}")
 
@@ -359,15 +355,25 @@ def main():
 
     print(f"🧠 Final domains: {len(final)}")
 
+    print("\n📦 Writing optimized blocklist...")
+
     with open(OUTPUT_FILE, "w") as f:
 
-        for d in sorted(final):
+        for d in sorted(
+            final,
+            key=lambda d: (
+                d.count("."),   # fewer labels first (faster DNS match)
+                len(d),         # shorter domains first
+                d
+            )
+        ):
             f.write(f"||{d}^\n")
 
     save_cache(cache)
 
     print("\n🏁 Done.")
 
+# ---------------------------
 
 if __name__ == "__main__":
     main()
