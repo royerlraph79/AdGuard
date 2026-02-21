@@ -21,7 +21,10 @@ HOSTS_RE = re.compile(
 SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
 TRAILING_OPTIONS_RE = re.compile(r"\$.*$")
 
-# Strict hostname validation (DNS-safe only)
+# Remove www, www1, www2, www999 etc.
+WWW_PREFIX_RE = re.compile(r"^www\d*\.", re.IGNORECASE)
+
+# Strict DNS hostname validation
 VALID_HOST_RE = re.compile(
     r"^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
@@ -57,7 +60,7 @@ def normalize_token(token: str) -> str:
     if d.startswith("@@"):
         return ""
 
-    # Reject wildcards completely (DNS cannot use them)
+    # Reject wildcards (DNS cannot use them)
     if "*" in d:
         return ""
 
@@ -68,6 +71,9 @@ def normalize_token(token: str) -> str:
     # Remove scheme/path/query/fragment
     d = SCHEME_RE.sub("", d)
     d = d.split("/")[0].split("?")[0].split("#")[0]
+
+    # Remove www, www1, www2 etc.
+    d = WWW_PREFIX_RE.sub("", d)
 
     # Remove port
     if ":" in d:
@@ -127,7 +133,7 @@ def remove_redundant_subdomains(domains: Set[str]) -> Set[str]:
     print("🧹 Removing redundant subdomains...")
     sys.stdout.flush()
 
-    # Sort parent domains first
+    # Sort shortest domains first
     ordered = sorted(domains, key=lambda d: d.count("."))
 
     kept = set()
