@@ -1,7 +1,7 @@
 ! Title: royerlraph79 AdGuard Blocklist
 ! Expires: 24 hours
-! Generated: Sat Feb 21 22:49:37 2026
-! Domains: 393851
+! Generated: Sun Feb 22 01:49:28 2026
+! Domains: 393881
 
 ||0-02.net^
 ||0-24bpautomentes.hu^
@@ -8944,6 +8944,7 @@
 ||4beast.com^
 ||4bf2807229e1b4c6.com^
 ||4bff3883fddeaf52.com^
+||4bfwvlvilfxvr6kv91.cfd^
 ||4bind2.cfd^
 ||4bind3.cfd^
 ||4bio.cc^
@@ -17331,6 +17332,7 @@
 ||8dea7d724f20.com^
 ||8dea7d724f20.xyz^
 ||8dewaamp.xyz^
+||8df0c9a696.com^
 ||8df4z-uyexj-cqhluc.xyz^
 ||8dfef35958ad3e49.com^
 ||8dg98-q2agu-uuzibd.xyz^
@@ -35225,6 +35227,7 @@
 ||ahtcwbfctgvnk.site^
 ||ahthegha.cfd^
 ||ahtimecstbi.com^
+||ahtohdywahxhb.online^
 ||ahtradeimpex.com^
 ||ahu.clubkidscuritibaahu.com.br^
 ||ahui3c.com^
@@ -50989,6 +50992,7 @@
 ||asgclickpp.com^
 ||asgg.ghostbin.me^
 ||asgh65tfsdxz.appspot.com^
+||asgiwdlmrcujs.online^
 ||ash-design-office.com^
 ||ash-holding.finance^
 ||ashabraces.com^
@@ -53750,6 +53754,7 @@
 ||avckcn3164.top^
 ||avckcn4614.top^
 ||avcounter10.com^
+||avcpygaawhfyo.site^
 ||avct.cloud^
 ||avctechn.sbs^
 ||avdbos.de^
@@ -61707,6 +61712,7 @@
 ||biabantmasali.blog^
 ||biabfqq.icu^
 ||biadigital.online^
+||biafagqhzedhn.space^
 ||biakon.com.pl^
 ||biakvwhahqeto.site^
 ||biallo1.de^
@@ -68618,6 +68624,7 @@
 ||bruised-card.pro^
 ||bruisedblock.pro^
 ||bruisedpaperworkmetre.com^
+||bruisedtell.pro^
 ||bruiseentrustcarbonate.com^
 ||brukenwald.info^
 ||brukuv.inkstation.com.au^
@@ -81039,6 +81046,7 @@
 ||clari.shop^
 ||claria.com^
 ||clarice.streema.com^
+||clariesreleap.shop^
 ||clarifyhealth.com^
 ||clarifytokens.digital^
 ||clarifytokens.info^
@@ -102800,6 +102808,7 @@
 ||delb.myspace.com^
 ||delb2.myspace.com^
 ||dele-b2.com^
+||deleb.xyz^
 ||delecpuzz.com^
 ||delectable-earth.com^
 ||delectablefriendship.pro^
@@ -113902,6 +113911,7 @@
 ||eazel.com^
 ||eazhyy734.vip^
 ||eazify.net^
+||eazqiicorbzpm.site^
 ||eazvcexgpvxnp.site^
 ||eazyleads.com^
 ||eazyoffice.in^
@@ -138456,6 +138466,7 @@
 ||gbnpdy3064.top^
 ||gbob.pk^
 ||gbod.org^
+||gboiptycrlu.com^
 ||gbooksdownloader.com^
 ||gbotvisit.com^
 ||gboy.top^
@@ -141281,6 +141292,7 @@
 ||giniwajoiainvestments.digital^
 ||ginjakcukdi.com^
 ||ginkersound.net^
+||ginnerethnish.cfd^
 ||ginningsteri.com^
 ||ginohcstet.com^
 ||ginta.link^
@@ -155689,6 +155701,7 @@
 ||heybuddytv.co.uk^
 ||heycomputers.com^
 ||heycrewdancer.com^
+||heycwyreohfaxdo.com^
 ||heydthsrglcrk.online^
 ||heyeilsa.xyz^
 ||heyeisaai.com^
@@ -177602,6 +177615,7 @@
 ||jumacuaresources.digital^
 ||jumbo-insurance.pro^
 ||jumbo-order.com^
+||jumbo-quantity.pro^
 ||jumbo.blinkit.com^
 ||jumbo.rs^
 ||jumbo.zomato.com^
@@ -180798,6 +180812,7 @@
 ||khatsaz.com^
 ||khattiknocks.shop^
 ||khavar.com^
+||khaxcgvusdd.com^
 ||khaxjxevsnigs.space^
 ||khazaei.click^
 ||khbgpgyoneegd.website^
@@ -184776,6 +184791,7 @@
 ||kwausmhqtlxne.site^
 ||kway.co.il^
 ||kwayboutique.com^
+||kwbdjazbglump.space^
 ||kwbenefits.cloud^
 ||kwbrtpsruanue.site^
 ||kwbtgame.com^
@@ -191406,6 +191422,7 @@
 ||litgert.com^
 ||lithicsaps.rest^
 ||lithicsulaibsings.cfd^
+||lithogsld.shop^
 ||lithopmail.com^
 ||lithuknhidp.com^
 ||litianping.com^
@@ -199765,6 +199782,7 @@
 ||lpconstrucao.com^
 ||lpcontent.net^
 ||lpconttop.com^
+||lpcqrynsjihwr.site^
 ||lpcqyjyhfhets.space^
 ||lpcv-adguard.pro^
 ||lpcvou9o3h6qp26lnj.rest^
@@ -199953,6 +199971,7 @@
 ||lqytpqwiwn.xyz^
 ||lqzoyqvbjkzqm.top^
 ||lqzqz.us.p448.com^
+||lqzsaynobtqgo.space^
 ||lqzu-protect.pro^
 ||lqzuhqofghiyl.site^
 ||lqzwen3105.top^
@@ -239223,6 +239242,7 @@
 ||njwqxq3117.top^
 ||njwqxq4517.top^
 ||njwyw.org^
+||njxhbvwpjuvyr.space^
 ||njxrpzdwiduhs.online^
 ||njxzvn3265.top^
 ||njy9.com^
@@ -265995,6 +266015,7 @@
 ||practicetoothpaste.com^
 ||practisepace.com^
 ||practiserussiangarments.com^
+||practitioner23.com^
 ||practproasse.digital^
 ||prada800gcr.online^
 ||pradabet-page-live.vip^
@@ -272167,6 +272188,7 @@
 ||qcre6lw6k4cv.top^
 ||qcrsp.biz^
 ||qcrxn3288.vip^
+||qcs6kxekav.com^
 ||qcsecure.com^
 ||qcshoeskuwait.com^
 ||qcso6j055.lat^
@@ -281780,6 +281802,7 @@
 ||rgfdd.victoriarosepark.com^
 ||rgfivb4263.top^
 ||rggbgduyvylx.com^
+||rggbguxuonpaqu.xyz^
 ||rggdqb3058.top^
 ||rggeolibxevzn.website^
 ||rggradtevjrhi.online^
@@ -282600,6 +282623,7 @@
 ||risehike.com^
 ||risel.site^
 ||risemax.rest^
+||risemiddleagedmart.com^
 ||riseonpath.com^
 ||riseonward.com^
 ||riseopportunity.com^
@@ -286947,6 +286971,7 @@
 ||rzss2zfue73dfvmj.truewargame.ch^
 ||rzsyenebnyvgs.website^
 ||rztrkr.com^
+||rzuitwlxozftj.website^
 ||rzuqqpwtpkztw.online^
 ||rzvcdclxehmnd.global^
 ||rzvln.eshakti.com^
@@ -330206,6 +330231,7 @@
 ||svkqc.com^
 ||svlcfatyzgmkcc.com^
 ||svlcsimi.com^
+||svlitnlsrnrfg.website^
 ||svlohhof.club^
 ||svlt.sivola.it^
 ||svlton3252.top^
@@ -352139,6 +352165,7 @@
 ||tsdnkj.com^
 ||tsdnkt4204.top^
 ||tsdtocl.com^
+||tsdtvcx579.com^
 ||tsdzydflyst.biolane.fr^
 ||tse-consultant-int.cloud^
 ||tse.telerama.fr^
@@ -380386,6 +380413,7 @@
 ||xeequgaxpdvcq.space^
 ||xefasuvexanalytics.digital^
 ||xefemixisusresources.click^
+||xefnw9x4w9pmi85.rest^
 ||xeforafuaindustries48.click^
 ||xegafipunorpartners.digital^
 ||xegeqea.com^
@@ -386806,6 +386834,7 @@
 ||ymmzb.com^
 ||ymmztxjktdirn.site^
 ||ymokymakyfe.biz^
+||ymokzqilqggeh.space^
 ||ymonetize.com^
 ||ymovooiljamnc.space^
 ||ympkfjphr.com^
@@ -388541,6 +388570,7 @@
 ||yvyquupzfhqkxg.com^
 ||yvysxocknufvp.online^
 ||yvyump6018.top^
+||yvywmoezamcsk.space^
 ||yvzgazds6d.com^
 ||yvzpacgrjzrra.site^
 ||yvzrzqpgzralh.online^
