@@ -8,6 +8,8 @@ https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt
 https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt
 https://blocklistproject.github.io/Lists/basic.txt
 https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt
+https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/EasyPrivacySpecific.txt
+https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/EasyPrivacy3rdParty.txt
 
 # https://energized.pro/blu/adblock.txt
 # https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/hoster.txt
