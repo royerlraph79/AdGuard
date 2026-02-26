@@ -3,14 +3,14 @@ https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
 https://badmojr.github.io/1Hosts/Lite/adblock.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.mini.txt
 https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext
-https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/urlshortener.txt
-https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt
 https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt
 https://blocklistproject.github.io/Lists/basic.txt
-https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt
-https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/EasyPrivacySpecific.txt
-https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/EasyPrivacy3rdParty.txt
 
+# https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/urlshortener.txt
+# https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/tif.mini.txt
+# https://blocklistproject.github.io/Lists/adguard/ransomware-ags.txt
+# https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/EasyPrivacySpecific.txt
+# https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/EasyPrivacy3rdParty.txt
 # https://energized.pro/blu/adblock.txt
 # https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/hoster.txt
 # https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/popupads.txt
