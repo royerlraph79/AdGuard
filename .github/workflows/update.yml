@@ -36,14 +36,14 @@ jobs:
       - name: 👀 Preview output
         run: |
           echo "== Preview SAFE =="
-          head -n 20 adguard_blocklist_safe.txt || true
+          head -n 25 adguard_blocklist_safe.txt || true
           SAFE_RULES=$(grep -E '^\|\|.+\^$|^\|\|.+\.\^$' adguard_blocklist_safe.txt | wc -l || true)
           echo "SAFE Rule count: $SAFE_RULES"
           echo "### SAFE Rule count: $SAFE_RULES" >> "$GITHUB_STEP_SUMMARY"
 
           echo ""
           echo "== Preview AGGRESSIVE =="
-          head -n 20 adguard_blocklist_aggressive.txt || true
+          head -n 25 adguard_blocklist_aggressive.txt || true
           AGGR_RULES=$(grep -E '^\|\|.+\^$|^\|\|.+\.\^$' adguard_blocklist_aggressive.txt | wc -l || true)
           echo "AGGRESSIVE Rule count: $AGGR_RULES"
           echo "### AGGRESSIVE Rule count: $AGGR_RULES" >> "$GITHUB_STEP_SUMMARY"
