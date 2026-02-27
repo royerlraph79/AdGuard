@@ -47,14 +47,14 @@ jobs:
       - name: ✅ Check for changes
         id: git-check
         run: |
-          if git diff --quiet adguard_blocklist.txt cache.json; then
+          if git diff --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changes detected."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Changes detected."
             git status --porcelain
-            git diff --stat adguard_blocklist.txt cache.json || true
+            git diff --stat || true
           fi
 
       - name: 📤 Commit and push changes
@@ -63,7 +63,7 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          git add adguard_blocklist.txt cache.json
+          git add -A
 
           git commit -m "🔄 Auto-update blocklist [skip ci]"
           git push
