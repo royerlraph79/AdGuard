@@ -14,7 +14,6 @@ jobs:
     timeout-minutes: 15
 
     steps:
-
       - name: ⬇️ Checkout repository
         uses: actions/checkout@v4
 
@@ -28,21 +27,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: ⚙️ Generate blocklist
+      - name: ⚙️ Generate blocklists (safe + aggressive)
         run: |
           echo "📍 STARTING convert_hosts.py"
-          python convert_hosts.py
+          python convert_hosts.py --output-base adguard_blocklist
           echo "✅ FINISHED convert_hosts.py"
 
       - name: 👀 Preview output
         run: |
-          echo "== Preview =="
-          head -n 10 adguard_blocklist.txt || true
+          echo "== Preview SAFE =="
+          head -n 12 adguard_blocklist_safe.txt || true
+          SAFE_RULES=$(grep -E '^\|\|.+\^$|^\|\|.+\.\^$' adguard_blocklist_safe.txt | wc -l || true)
+          echo "SAFE Rule count: $SAFE_RULES"
+          echo "### SAFE Rule count: $SAFE_RULES" >> "$GITHUB_STEP_SUMMARY"
 
-          RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
-
-          echo "Rule count: $RULES"
-          echo "### Rule count: $RULES" >> "$GITHUB_STEP_SUMMARY"
+          echo ""
+          echo "== Preview AGGRESSIVE =="
+          head -n 12 adguard_blocklist_aggressive.txt || true
+          AGGR_RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist_aggressive.txt | wc -l || true)
+          echo "AGGRESSIVE Rule count: $AGGR_RULES"
+          echo "### AGGRESSIVE Rule count: $AGGR_RULES" >> "$GITHUB_STEP_SUMMARY"
 
       - name: ✅ Check for changes
         id: git-check
@@ -64,6 +68,5 @@ jobs:
           git config user.email "github-actions@github.com"
 
           git add -A
-
-          git commit -m "🔄 Auto-update blocklist [skip ci]"
+          git commit -m "🔄 Auto-update blocklists [skip ci]"
           git push
