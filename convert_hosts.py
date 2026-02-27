@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
+
 from __future__ import annotations
 
-import argparse
-import json
-import logging
 import re
-from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import logging
+import argparse
 from pathlib import Path
+from typing import Iterable
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import requests
-from publicsuffix2 import PublicSuffixList
 from requests import RequestException
 
 # ============================================================
@@ -26,56 +24,20 @@ HOSTS_RE = re.compile(
     re.IGNORECASE,
 )
 
-SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
 TRAILING_OPTIONS_RE = re.compile(r"\$.*$")
 WWW_PREFIX_RE = re.compile(r"^www\d*\.", re.IGNORECASE)
 
-# Relaxed but safe hostname validation
 VALID_HOST_RE = re.compile(
-    r"^(?=.{1,253}$)([a-z0-9-]+\.)+[a-z0-9-]{2,63}$",
-    re.IGNORECASE,
+    r"^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
 
-USER_AGENT = "royerlraph79-AdGuardBlocklist/7.0"
-
-SAFE_TLD_THRESHOLD = 3
-AGGRESSIVE_TLD_THRESHOLD = 2
-
-SAFE_MIN_LABEL_LENGTH = 7
-AGGRESSIVE_MIN_LABEL_LENGTH = 6
-
-DO_NOT_COLLAPSE = {
-    "com", "net", "org", "edu", "gov", "mil", "int",
-    "co", "uk", "ru", "de", "fr", "it", "es", "nl", "be", "ca",
-    "lan", "local", "home", "arpa",
-    "cdn", "static", "img", "api", "www", "mail",
-}
-
-SAFE_KEYWORDS = {
-    "doubleclick",
-    "googlesyndication",
-    "adservice",
-    "scorecardresearch",
-    "taboola",
-    "outbrain",
-}
-
-AGGRESSIVE_EXTRA_KEYWORDS = {
-    "pubads",
-    "pubadx",
-    "adserver",
-    "adsystem",
-    "tracking",
-    "analytics",
-    "telemetry",
-    "metrics",
-}
+USER_AGENT = "royerlraph79-AdGuardBlocklist/2.0"
 
 # ============================================================
-# Logging
+# Logging Setup
 # ============================================================
 
-def setup_logging(verbose: bool):
+def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -83,253 +45,279 @@ def setup_logging(verbose: bool):
     )
 
 # ============================================================
-# Normalization
+# Stats
+# ============================================================
+
+def make_stats() -> dict[str, int]:
+    return {
+        "total_lines": 0,
+        "invalid_lines": 0,
+        "duplicates": 0,
+        "added": 0,
+        "skipped": 0,
+    }
+
+# ============================================================
+# Helpers
 # ============================================================
 
 def is_comment_or_empty(line: str) -> bool:
     ln = line.strip()
     return (not ln) or ln.startswith(COMMENT_PREFIXES)
 
+# ============================================================
+# Normalization
+# ============================================================
+
 def normalize_token(token: str) -> str:
     d = token.strip().lower()
     if not d:
         return ""
-    if d.startswith("@@") or "*" in d:
+
+    if d.startswith("@@"):
         return ""
 
+    if "*" in d:
+        return ""
+
+    if d.startswith(("-", ".", "_")):
+        return ""
+
+    # Proper URL parsing
     if d.startswith(("http://", "https://")):
         parsed = urlsplit(d)
         d = parsed.hostname or ""
-    else:
-        d = SCHEME_RE.sub("", d)
-        for sep in ("/", "?", "#"):
-            if sep in d:
-                d = d.split(sep, 1)[0]
 
+    # Remove path/query/fragment if still present
+    for sep in ("/", "?", "#"):
+        if sep in d:
+            d = d.split(sep, 1)[0]
+
+    # Remove port
     if ":" in d:
         d = d.split(":", 1)[0]
 
     d = WWW_PREFIX_RE.sub("", d)
     d = d.rstrip(".^")
 
-    if not VALID_HOST_RE.fullmatch(d):
+    if not VALID_HOST_RE.match(d):
         return ""
 
     return d
 
+# ============================================================
+# Extract domain
+# ============================================================
+
 def extract_from_adblock_rule(line: str) -> str:
     ln = line.strip()
+
     if ln.startswith("@@"):
         return ""
+
     ln = TRAILING_OPTIONS_RE.sub("", ln)
+
     m = re.match(r"^\|\|([^\^/]+)", ln)
     return m.group(1) if m else ""
 
 def choose_token(raw_line: str) -> str:
     ln = raw_line.strip()
+
     ad = extract_from_adblock_rule(ln)
     if ad:
         return ad
+
     hm = HOSTS_RE.match(ln)
     if hm:
         return hm.group(1)
+
     return ln.split()[0] if ln else ""
 
 # ============================================================
-# Subdomain Dedupe
+# Reverse Trie Deduplication (Scales to Millions)
 # ============================================================
 
 class DomainTrie:
-    def __init__(self):
-        self.root = {}
+    def __init__(self) -> None:
+        self.root: dict[str, dict] = {}
 
     def insert(self, domain: str) -> bool:
+        """
+        Insert domain into reverse trie.
+        Returns True if inserted, False if redundant.
+        """
         node = self.root
         parts = domain.split(".")[::-1]
+
         for part in parts:
             if "__end__" in node:
                 return False
             node = node.setdefault(part, {})
+
         node["__end__"] = {}
         return True
 
-def remove_redundant_subdomains(domains):
+def remove_redundant_subdomains(domains: Iterable[str]) -> set[str]:
+    logging.info("Removing redundant subdomains (reverse trie)...")
+
     trie = DomainTrie()
-    kept = set()
-    for d in sorted(domains, key=lambda x: (x.count("."), x)):
-        if trie.insert(d):
-            kept.add(d)
-    return kept
+    result: set[str] = set()
+
+    # shortest first for deterministic behavior
+    for domain in sorted(domains, key=lambda d: (d.count("."), d)):
+        if trie.insert(domain):
+            result.add(domain)
+
+    logging.info("Subdomain dedupe complete.")
+    return result
 
 # ============================================================
-# Collapse Logic
+# Fetch + Aggregate
 # ============================================================
 
-@dataclass
-class Mode:
-    name: str
-    threshold: int
-    min_len: int
-    keywords: set[str]
-    suffix: str
+def load_domains_from_url(
+    session: requests.Session,
+    url: str,
+    seen: set[str],
+) -> tuple[set[str], dict[str, int]]:
 
-SAFE_MODE = Mode(
-    "SAFE",
-    SAFE_TLD_THRESHOLD,
-    SAFE_MIN_LABEL_LENGTH,
-    SAFE_KEYWORDS,
-    ".^",
-)
+    logging.info("Fetching %s", url)
 
-AGGRESSIVE_MODE = Mode(
-    "AGGRESSIVE",
-    AGGRESSIVE_TLD_THRESHOLD,
-    AGGRESSIVE_MIN_LABEL_LENGTH,
-    SAFE_KEYWORDS | AGGRESSIVE_EXTRA_KEYWORDS,
-    "^",
-)
+    stats = make_stats()
+    found: set[str] = set()
 
-def is_forbidden(token: str) -> bool:
-    t = token.lower()
-    if t in DO_NOT_COLLAPSE:
-        return True
-    if len(t) < 4:
-        return True
-    if t.isdigit():
-        return True
-    return False
+    try:
+        r = session.get(
+            url,
+            timeout=60,
+            headers={"User-Agent": USER_AGENT},
+        )
+        r.raise_for_status()
+        text = r.text
 
-def build_rules(domains, mode: Mode, psl: PublicSuffixList):
+    except RequestException as e:
+        logging.error("Error fetching %s: %s", url, e)
+        return found, stats
 
-    keyword_hits = set()
-    registrables = set()
-    keyword_domains = 0
+    for raw in text.splitlines():
+        stats["total_lines"] += 1
+        ln = raw.strip()
 
-    for d in domains:
-        labels = d.split(".")
-        ps = psl.get_public_suffix(d)
-        ps_labels = ps.split(".") if ps else []
-        core = labels[:-len(ps_labels)] if ps_labels else labels[:-1]
+        if ln.startswith("@@") or is_comment_or_empty(ln):
+            stats["invalid_lines"] += 1
+            continue
 
-        hit = False
-        for lbl in core:
-            for kw in mode.keywords:
-                if kw in lbl and not is_forbidden(kw):
-                    keyword_hits.add(kw)
-                    hit = True
-        if hit:
-            keyword_domains += 1
-        else:
-            reg = psl.get_sld(d)
-            if reg:
-                registrables.add(reg)
+        token = choose_token(ln)
+        domain = normalize_token(token)
 
-    registrables = remove_redundant_subdomains(registrables)
+        if not domain:
+            stats["invalid_lines"] += 1
+            continue
 
-    groups = defaultdict(set)
-    for reg in registrables:
-        groups[reg.split(".", 1)[0]].add(reg)
+        if domain in seen:
+            stats["duplicates"] += 1
+            continue
 
-    collapsed = set()
-    for lbl, regs in groups.items():
-        if len(regs) >= mode.threshold and len(lbl) >= mode.min_len and not is_forbidden(lbl):
-            collapsed.add(lbl)
+        seen.add(domain)
+        found.add(domain)
+        stats["added"] += 1
 
-    rules = set()
+    stats["skipped"] = stats["invalid_lines"] + stats["duplicates"]
 
-    for kw in keyword_hits:
-        rules.add(f"||{kw}{mode.suffix}")
+    logging.debug("Stats for %s: %s", url, stats)
+    return found, stats
 
-    for lbl in collapsed:
-        rules.add(f"||{lbl}{mode.suffix}")
+# ============================================================
+# Write Output
+# ============================================================
 
-    for reg in registrables:
-        if reg.split(".", 1)[0] not in collapsed:
-            rules.add(f"||{reg}^")
+def write_output(output_path: Path, domains: set[str]) -> None:
+    logging.info("Writing output to %s", output_path)
 
-    return rules, {
-        "keyword_rules": len(keyword_hits),
-        "keyword_domains": keyword_domains,
-        "tld_rules": len(collapsed),
-        "final_rules": len(rules),
-    }
+    now = datetime.now(timezone.utc).strftime(
+        "%a %b %d %H:%M:%S %Y UTC"
+    )
+
+    header = (
+        "! Title: royerlraph79 AdGuard Blocklist\n"
+        "! Expires: 24 hours\n"
+        f"! Generated: {now}\n"
+        f"! Domains: {len(domains)}\n\n"
+    )
+
+    lines = [f"||{domain}^\n" for domain in sorted(domains)]
+
+    output_path.write_text(header + "".join(lines), encoding="utf-8")
 
 # ============================================================
 # Main
 # ============================================================
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-s", "--source", default="sources.txt")
-    parser.add_argument("-b", "--output-base", default="adguard_blocklist")
-    parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+def main() -> None:
 
+    parser = argparse.ArgumentParser(
+        description="Generate optimized AdGuard blocklist."
+    )
+    parser.add_argument(
+        "-s", "--source",
+        default="sources.txt",
+        help="Path to sources file",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default="adguard_blocklist.txt",
+        help="Output file",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable debug logging",
+    )
+
+    args = parser.parse_args()
     setup_logging(args.verbose)
 
     source_path = Path(args.source)
+    output_path = Path(args.output)
+
     if not source_path.exists():
-        logging.error("sources.txt missing")
+        logging.error("Source file not found: %s", source_path)
         return
 
     urls = [
         line.strip()
-        for line in source_path.read_text().splitlines()
+        for line in source_path.read_text(encoding="utf-8").splitlines()
         if not is_comment_or_empty(line)
     ]
 
-    psl = PublicSuffixList()
+    if not urls:
+        logging.error("No sources found in %s", source_path)
+        return
 
-    all_domains = set()
+    logging.info("Starting blocklist generation")
+    logging.info("Sources count: %d", len(urls))
+
+    all_domains: set[str] = set()
+    global_stats = make_stats()
 
     with requests.Session() as session:
         for url in urls:
-            try:
-                r = session.get(url, timeout=60)
-                r.raise_for_status()
-                for raw in r.text.splitlines():
-                    token = choose_token(raw)
-                    domain = normalize_token(token)
-                    if domain:
-                        all_domains.add(domain)
-            except RequestException as e:
-                logging.error(f"Fetch failed: {url} ({e})")
+            _, stats = load_domains_from_url(session, url, all_domains)
+            for k in global_stats:
+                global_stats[k] += stats[k]
 
-    logging.info("Normalized domains: %d", len(all_domains))
+    logging.info("Raw domains: %d", len(all_domains))
 
-    if not all_domains:
-        logging.error("No domains survived normalization.")
-        return
+    final_domains = remove_redundant_subdomains(all_domains)
 
-    safe_rules, safe_stats = build_rules(all_domains, SAFE_MODE, psl)
-    aggressive_rules, aggressive_stats = build_rules(all_domains, AGGRESSIVE_MODE, psl)
+    logging.info("Final domains: %d", len(final_domains))
+    logging.info("Global stats: %s", global_stats)
 
-    now = datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y UTC")
+    write_output(output_path, final_domains)
 
-    def write(path, title, rules, stats):
-        header = (
-            f"! Title: {title}\n"
-            "! Expires: 24 hours\n"
-            f"! Generated: {now}\n"
-            f"! Rules: {len(rules)}\n"
-            f"! Keyword collapses: {stats['keyword_rules']} (domains matched: {stats['keyword_domains']})\n"
-            f"! TLD collapses: {stats['tld_rules']}\n\n"
-        )
-        Path(path).write_text(header + "\n".join(sorted(rules)) + "\n")
-
-    write(f"{args.output_base}_safe.txt",
-          "royerlraph79 AdGuard Blocklist (SAFE)",
-          safe_rules,
-          safe_stats)
-
-    write(f"{args.output_base}_aggressive.txt",
-          "royerlraph79 AdGuard Blocklist (AGGRESSIVE)",
-          aggressive_rules,
-          aggressive_stats)
-
-    logging.info("[SAFE] %s", safe_stats)
-    logging.info("[AGGRESSIVE] %s", aggressive_stats)
     logging.info("Done.")
+
+# ============================================================
 
 if __name__ == "__main__":
     main()
