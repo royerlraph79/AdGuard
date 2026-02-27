@@ -1,2 +1,1 @@
 requests>=2.31.0,<3
-publicsuffix2>=2.20191221
