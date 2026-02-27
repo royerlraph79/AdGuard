@@ -10,13 +10,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlsplit
 
 import requests
 from publicsuffix2 import PublicSuffixList
 from requests import RequestException
 
 # ============================================================
-# Config
+# Config / Constants
 # ============================================================
 
 COMMENT_PREFIXES = ("#", "!", "//", ";")
@@ -26,6 +27,7 @@ HOSTS_RE = re.compile(
     re.IGNORECASE,
 )
 
+SCHEME_RE = re.compile(r"^https?://", re.IGNORECASE)
 TRAILING_OPTIONS_RE = re.compile(r"\$.*$")
 WWW_PREFIX_RE = re.compile(r"^www\d*\.", re.IGNORECASE)
 
@@ -33,12 +35,27 @@ VALID_HOST_RE = re.compile(
     r"^(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
 
-USER_AGENT = "royerlraph79-AdGuardBlocklist/4.0"
+USER_AGENT = "royerlraph79-AdGuardBlocklist/5.0"
 
+DEFAULT_SOURCE_FILE = "sources.txt"
+DEFAULT_OUTPUT_BASE = "adguard_blocklist"
+DEFAULT_CACHE_FILE = "cache.json"
+
+# Mode thresholds
 SAFE_TLD_THRESHOLD = 3
 AGGRESSIVE_TLD_THRESHOLD = 2
 
-SAFE_KEYWORDS = {
+# Hard “do not collapse to these” guardrail.
+# Includes common public suffixes and generic tokens that should never become a standalone rule.
+DO_NOT_COLLAPSE = {
+    "com", "net", "org", "edu", "gov", "mil", "int",
+    "co", "uk", "ru", "de", "fr", "it", "es", "nl", "be", "ca", "us", "au",
+    "jp", "cn", "br", "mx", "in", "ch", "se", "no", "fi", "dk", "ie",
+    "lan", "local", "home", "arpa",
+}
+
+# SAFE keywords: specific, well-known ad/tracker families (label-aware matching)
+SAFE_KEYWORDS: set[str] = {
     "doubleclick",
     "googlesyndication",
     "adservice",
@@ -47,19 +64,25 @@ SAFE_KEYWORDS = {
     "outbrain",
 }
 
-AGGRESSIVE_EXTRA_KEYWORDS = {
-    "pub",
-    "ads",
-    "trk",
-    "track",
+# AGGRESSIVE extras: still specific. Avoid generic tokens like "ads" or "pub".
+AGGRESSIVE_EXTRA_KEYWORDS: set[str] = {
+    "pubads",
+    "pubadx",
+    "adserver",
+    "adsystem",
+    "adsrv",
+    "trackers",
+    "tracking",
+    "analytics",
     "metrics",
+    "telemetry",
 }
 
 # ============================================================
 # Logging
 # ============================================================
 
-def setup_logging(verbose: bool):
+def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -75,19 +98,54 @@ def is_comment_or_empty(line: str) -> bool:
     return (not ln) or ln.startswith(COMMENT_PREFIXES)
 
 def normalize_token(token: str) -> str:
+    """
+    Normalize to a strict DNS hostname:
+    - lowercase
+    - strip scheme/path/query/fragment
+    - strip www\d*.
+    - strip port
+    - reject wildcards, whitelist markers, bad leading chars
+    - strict hostname validation
+    """
     d = token.strip().lower()
     if not d:
         return ""
-    if d.startswith("@@") or "*" in d:
+
+    if d.startswith("@@"):
         return ""
+
+    if "*" in d:
+        return ""
+
     if d.startswith(("-", ".", "_")):
         return ""
+
+    # If it's a URL, parse properly
+    if d.startswith(("http://", "https://")):
+        parsed = urlsplit(d)
+        d = parsed.hostname or ""
+    else:
+        # Remove scheme if present without proper URL format
+        d = SCHEME_RE.sub("", d)
+
+        # Drop any path/query/fragment remnants
+        for sep in ("/", "?", "#"):
+            if sep in d:
+                d = d.split(sep, 1)[0]
+
+    # Remove port
     if ":" in d:
         d = d.split(":", 1)[0]
+
+    # Remove www, www1, www2 etc.
     d = WWW_PREFIX_RE.sub("", d)
+
+    # Remove trailing adblock chars
     d = d.rstrip(".^")
+
     if not VALID_HOST_RE.fullmatch(d):
         return ""
+
     return d
 
 def extract_from_adblock_rule(line: str) -> str:
@@ -100,30 +158,170 @@ def extract_from_adblock_rule(line: str) -> str:
 
 def choose_token(raw_line: str) -> str:
     ln = raw_line.strip()
+
     ad = extract_from_adblock_rule(ln)
     if ad:
         return ad
+
     hm = HOSTS_RE.match(ln)
     if hm:
         return hm.group(1)
+
     return ln.split()[0] if ln else ""
 
 # ============================================================
-# Core Collapse Logic
+# Reverse Trie subdomain dedupe (kept)
+# ============================================================
+
+class DomainTrie:
+    def __init__(self) -> None:
+        self.root: dict[str, dict] = {}
+
+    def insert(self, domain: str) -> bool:
+        node = self.root
+        parts = domain.split(".")[::-1]
+        for part in parts:
+            if "__end__" in node:
+                return False
+            node = node.setdefault(part, {})
+        node["__end__"] = {}
+        return True
+
+def remove_redundant_subdomains(domains: Iterable[str]) -> set[str]:
+    trie = DomainTrie()
+    kept: set[str] = set()
+    for d in sorted(domains, key=lambda x: (x.count("."), x)):
+        if trie.insert(d):
+            kept.add(d)
+    return kept
+
+# ============================================================
+# Cache for conditional requests
 # ============================================================
 
 @dataclass
+class CacheEntry:
+    etag: str | None = None
+    last_modified: str | None = None
+
+def load_cache(path: Path) -> dict[str, CacheEntry]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        out: dict[str, CacheEntry] = {}
+        if isinstance(raw, dict):
+            for url, meta in raw.items():
+                if isinstance(meta, dict):
+                    out[url] = CacheEntry(
+                        etag=meta.get("etag"),
+                        last_modified=meta.get("last_modified"),
+                    )
+        return out
+    except Exception as e:
+        logging.warning("Failed to read cache %s: %s (starting fresh)", path, e)
+        return {}
+
+def save_cache(path: Path, cache: dict[str, CacheEntry]) -> None:
+    raw: dict[str, dict[str, str]] = {}
+    for url, entry in cache.items():
+        obj: dict[str, str] = {}
+        if entry.etag:
+            obj["etag"] = entry.etag
+        if entry.last_modified:
+            obj["last_modified"] = entry.last_modified
+        raw[url] = obj
+    path.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+
+# ============================================================
+# Fetch
+# ============================================================
+
+def load_domains_from_url(
+    session: requests.Session,
+    url: str,
+    seen: set[str],
+    cache: dict[str, CacheEntry],
+) -> tuple[set[str], dict[str, int]]:
+
+    stats = {
+        "total_lines": 0,
+        "invalid_lines": 0,
+        "duplicates": 0,
+        "added": 0,
+        "skipped": 0,
+        "not_modified": 0,
+    }
+    found: set[str] = set()
+
+    headers = {"User-Agent": USER_AGENT}
+    cached = cache.get(url)
+    if cached:
+        if cached.etag:
+            headers["If-None-Match"] = cached.etag
+        if cached.last_modified:
+            headers["If-Modified-Since"] = cached.last_modified
+
+    try:
+        r = session.get(url, timeout=60, headers=headers)
+        if r.status_code == 304:
+            stats["not_modified"] += 1
+            logging.info("Not modified: %s", url)
+            return found, stats
+
+        r.raise_for_status()
+
+        cache[url] = CacheEntry(
+            etag=r.headers.get("ETag"),
+            last_modified=r.headers.get("Last-Modified"),
+        )
+
+        text = r.text
+    except RequestException as e:
+        logging.error("Error fetching %s: %s", url, e)
+        return found, stats
+
+    for raw in text.splitlines():
+        stats["total_lines"] += 1
+        ln = raw.strip()
+
+        if ln.startswith("@@") or is_comment_or_empty(ln):
+            stats["invalid_lines"] += 1
+            continue
+
+        token = choose_token(ln)
+        d = normalize_token(token)
+        if not d:
+            stats["invalid_lines"] += 1
+            continue
+
+        if d in seen:
+            stats["duplicates"] += 1
+            continue
+
+        seen.add(d)
+        found.add(d)
+        stats["added"] += 1
+
+    stats["skipped"] = stats["invalid_lines"] + stats["duplicates"]
+    return found, stats
+
+# ============================================================
+# Collapse logic (SAFE vs AGGRESSIVE)
+# ============================================================
+
+@dataclass(frozen=True)
 class Mode:
     name: str
     tld_threshold: int
     min_label_length: int
     keywords: set[str]
-    collapsed_suffix: str
+    collapsed_suffix: str  # safe ".^" boundary or aggressive "^"
 
 SAFE_MODE = Mode(
     name="SAFE",
     tld_threshold=SAFE_TLD_THRESHOLD,
-    min_label_length=5,
+    min_label_length=6,     # stricter to avoid junk labels
     keywords=SAFE_KEYWORDS,
     collapsed_suffix=".^",
 )
@@ -131,138 +329,261 @@ SAFE_MODE = Mode(
 AGGRESSIVE_MODE = Mode(
     name="AGGRESSIVE",
     tld_threshold=AGGRESSIVE_TLD_THRESHOLD,
-    min_label_length=3,
+    min_label_length=5,     # still conservative enough to avoid com/net/lan nonsense
     keywords=SAFE_KEYWORDS | AGGRESSIVE_EXTRA_KEYWORDS,
     collapsed_suffix="^",
 )
 
 def registrable(psl: PublicSuffixList, domain: str) -> str:
-    return psl.get_sld(domain) or ""
+    try:
+        return psl.get_sld(domain) or ""
+    except Exception:
+        return ""
+
+def public_suffix(psl: PublicSuffixList, domain: str) -> str:
+    """
+    Returns public suffix, e.g.:
+      ticketmaster.co.uk -> co.uk
+      foo.com -> com
+    """
+    try:
+        return psl.get_public_suffix(domain) or ""
+    except Exception:
+        return ""
 
 def base_label(reg: str) -> str:
     return reg.split(".", 1)[0] if reg else ""
 
-def build_rules(domains: set[str], mode: Mode, psl: PublicSuffixList):
+def is_forbidden_collapse_token(psl: PublicSuffixList, token: str) -> bool:
+    t = token.lower().strip()
+    if not t:
+        return True
+    if t in DO_NOT_COLLAPSE:
+        return True
+    # Don’t collapse purely numeric labels
+    if t.isdigit():
+        return True
+    # Don’t collapse tokens that are themselves public suffixes
+    # (best-effort check: token as a "domain" has itself as public suffix)
+    ps = public_suffix(psl, t)
+    if ps and ps == t:
+        return True
+    return False
 
-    keyword_domains = []
-    registrables = []
+def keyword_hits_for_domain(psl: PublicSuffixList, domain: str, keywords: set[str]) -> set[str]:
+    """
+    Label-aware keyword detection:
+    - Split domain into labels
+    - Ignore public suffix labels at the end
+    - Match keywords against remaining labels (exact or substring within the label)
+    """
+    dom_labels = domain.split(".")
+    ps = public_suffix(psl, domain)
+    ps_labels = ps.split(".") if ps else []
+
+    # remove suffix labels from consideration
+    cut = len(dom_labels) - len(ps_labels)
+    if cut < 1:
+        cut = max(1, len(dom_labels) - 1)  # fallback: ignore last label
+    core_labels = dom_labels[:cut]
+
+    hits: set[str] = set()
+    for lbl in core_labels:
+        for kw in keywords:
+            if len(kw) < 5:
+                continue
+            if kw in lbl:
+                hits.add(kw)
+    return hits
+
+@dataclass
+class BuildReport:
+    keyword_collapse_rules: int
+    keyword_collapsed_domains: int
+    tld_collapse_rules: int
+    tld_collapsed_registrables: int
+    final_rules: int
+
+def build_rules(domains: set[str], mode: Mode, psl: PublicSuffixList) -> tuple[set[str], BuildReport]:
+    # Step 1: keyword-collapse candidates & registrables for the rest
+    keyword_domains: list[str] = []
+    registrables_set: set[str] = set()
+    keyword_hits: set[str] = set()
 
     for d in domains:
-        if any(k in d for k in mode.keywords):
+        hits = keyword_hits_for_domain(psl, d, mode.keywords)
+        # filter forbidden keyword collapse tokens
+        hits = {h for h in hits if not is_forbidden_collapse_token(psl, h)}
+        if hits:
             keyword_domains.append(d)
+            keyword_hits |= hits
         else:
             reg = registrable(psl, d)
             if reg:
-                registrables.append(reg)
+                registrables_set.add(reg)
 
-    keyword_hits = {
-        k for d in keyword_domains for k in mode.keywords if k in d
-    }
+    # Step 2: dedupe subdomains among registrables (optional improvement kept)
+    registrables_set = remove_redundant_subdomains(registrables_set)
 
-    groups = defaultdict(set)
-    for reg in registrables:
-        groups[base_label(reg)].add(reg)
+    # Step 3: group registrables by base label for cross-TLD collapse
+    groups: dict[str, set[str]] = defaultdict(set)
+    for reg in registrables_set:
+        lbl = base_label(reg)
+        if lbl:
+            groups[lbl].add(reg)
 
-    collapsed_labels = {
-        lbl for lbl, regs in groups.items()
-        if len(regs) >= mode.tld_threshold
-        and len(lbl) >= mode.min_label_length
-    }
+    collapsed_labels: set[str] = set()
+    for lbl, regs in groups.items():
+        if len(lbl) < mode.min_label_length:
+            continue
+        if is_forbidden_collapse_token(psl, lbl):
+            continue
+        if len(regs) >= mode.tld_threshold:
+            collapsed_labels.add(lbl)
 
-    rules = set()
+    # Step 4: build final rule set
+    rules: set[str] = set()
 
-    # Keyword rules
-    for kw in keyword_hits:
+    # keyword rules
+    for kw in sorted(keyword_hits):
+        # safe: ||kw.^  aggressive: ||kw^
         rules.add(f"||{kw}{mode.collapsed_suffix}")
 
-    # TLD collapse rules
-    for lbl in collapsed_labels:
+    # tld-collapsed label rules
+    for lbl in sorted(collapsed_labels):
         rules.add(f"||{lbl}{mode.collapsed_suffix}")
 
-    # Non-collapsed registrables
-    for reg in registrables:
+    # remaining registrables
+    for reg in registrables_set:
         lbl = base_label(reg)
-        if lbl not in collapsed_labels:
-            rules.add(f"||{reg}^")
+        if lbl in collapsed_labels:
+            continue
+        rules.add(f"||{reg}^")
 
-    # =======================
-    # Analytics
-    # =======================
+    # reporting
+    tld_collapsed_regs = sum(len(groups[l]) for l in collapsed_labels)
 
-    logging.info(f"[{mode.name}] Total domains: {len(domains)}")
-    logging.info(f"[{mode.name}] Keyword collapses: {len(keyword_hits)}")
-    logging.info(f"[{mode.name}] Domains via keyword collapse: {len(keyword_domains)}")
-    logging.info(f"[{mode.name}] TLD label collapses: {len(collapsed_labels)}")
-    logging.info(
-        f"[{mode.name}] Domains via TLD collapse: "
-        f"{sum(len(groups[l]) for l in collapsed_labels)}"
+    report = BuildReport(
+        keyword_collapse_rules=len(keyword_hits),
+        keyword_collapsed_domains=len(keyword_domains),
+        tld_collapse_rules=len(collapsed_labels),
+        tld_collapsed_registrables=tld_collapsed_regs,
+        final_rules=len(rules),
     )
-    logging.info(f"[{mode.name}] Final rules: {len(rules)}")
 
-    return rules
+    return rules, report
+
+# ============================================================
+# Output
+# ============================================================
+
+def write_blocklist(path: Path, rules: set[str], title: str, report: BuildReport) -> None:
+    now = datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y UTC")
+    header = (
+        f"! Title: {title}\n"
+        "! Expires: 24 hours\n"
+        f"! Generated: {now}\n"
+        f"! Rules: {len(rules)}\n"
+        f"! Keyword collapses: {report.keyword_collapse_rules} (domains matched: {report.keyword_collapsed_domains})\n"
+        f"! TLD collapses: {report.tld_collapse_rules} (registrables collapsed: {report.tld_collapsed_registrables})\n\n"
+    )
+    content = header + "".join(f"{r}\n" for r in sorted(rules))
+    path.write_text(content, encoding="utf-8")
 
 # ============================================================
 # Main
 # ============================================================
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-s", "--source", default="sources.txt")
-    parser.add_argument("-b", "--output-base", default="adguard_blocklist")
-    parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Generate AdGuard blocklists (safe + aggressive) with compression.")
+    p.add_argument("-s", "--source", default=DEFAULT_SOURCE_FILE, help="Path to sources file")
+    p.add_argument("-b", "--output-base", default=DEFAULT_OUTPUT_BASE, help="Base name for outputs")
+    p.add_argument("-c", "--cache", default=DEFAULT_CACHE_FILE, help="Cache JSON file for conditional requests")
+    p.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    return p.parse_args()
 
+def main() -> None:
+    args = parse_args()
     setup_logging(args.verbose)
 
     source_path = Path(args.source)
+    cache_path = Path(args.cache)
+
+    safe_out = Path(f"{args.output_base}_safe.txt")
+    aggressive_out = Path(f"{args.output_base}_aggressive.txt")
+
     if not source_path.exists():
-        logging.error("Missing sources.txt")
+        logging.error("Source file not found: %s", source_path)
         return
 
     urls = [
         line.strip()
-        for line in source_path.read_text().splitlines()
+        for line in source_path.read_text(encoding="utf-8").splitlines()
         if not is_comment_or_empty(line)
     ]
+    if not urls:
+        logging.error("No sources found in %s", source_path)
+        return
 
     psl = PublicSuffixList()
+    cache = load_cache(cache_path)
 
-    all_domains = set()
+    all_normalized: set[str] = set()
+    global_stats = defaultdict(int)
+
+    logging.info("Starting generation. Sources: %d", len(urls))
+
     with requests.Session() as session:
         for url in urls:
-            try:
-                r = session.get(url, timeout=60)
-                r.raise_for_status()
-                for raw in r.text.splitlines():
-                    token = choose_token(raw)
-                    domain = normalize_token(token)
-                    if domain:
-                        all_domains.add(domain)
-            except RequestException as e:
-                logging.error(f"Fetch failed: {url} ({e})")
+            found, stats = load_domains_from_url(session, url, all_normalized, cache)
+            for k, v in stats.items():
+                global_stats[k] += v
 
-    logging.info(f"Normalized domains collected: {len(all_domains)}")
+    save_cache(cache_path, cache)
 
-    safe_rules = build_rules(all_domains, SAFE_MODE, psl)
-    aggressive_rules = build_rules(all_domains, AGGRESSIVE_MODE, psl)
+    logging.info("Normalized domains collected: %d", len(all_normalized))
+    logging.info("Global stats: %s", dict(global_stats))
 
-    now = datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y UTC")
+    safe_rules, safe_report = build_rules(all_normalized, SAFE_MODE, psl)
+    aggressive_rules, aggressive_report = build_rules(all_normalized, AGGRESSIVE_MODE, psl)
 
-    def write(path: Path, title: str, rules: set[str]):
-        header = (
-            f"! Title: {title}\n"
-            "! Expires: 24 hours\n"
-            f"! Generated: {now}\n"
-            f"! Rules: {len(rules)}\n\n"
-        )
-        path.write_text(header + "\n".join(sorted(rules)) + "\n")
+    # extra guard: ensure we never accidentally emit forbidden collapse tokens
+    def scrub_bad_rules(rules: set[str]) -> set[str]:
+        cleaned = set()
+        for r in rules:
+            # r form: ||token^ or ||token.^
+            token = r[2:]
+            token = token[:-1] if token.endswith("^") else token
+            token = token[:-2] if token.endswith(".^") else token
+            token = token.strip(".")
+            if token in DO_NOT_COLLAPSE:
+                continue
+            cleaned.add(r)
+        return cleaned
 
-    write(Path(f"{args.output_base}_safe.txt"),
-          "royerlraph79 AdGuard Blocklist (SAFE)", safe_rules)
+    safe_rules = scrub_bad_rules(safe_rules)
+    aggressive_rules = scrub_bad_rules(aggressive_rules)
 
-    write(Path(f"{args.output_base}_aggressive.txt"),
-          "royerlraph79 AdGuard Blocklist (AGGRESSIVE)", aggressive_rules)
+    write_blocklist(
+        safe_out,
+        safe_rules,
+        "royerlraph79 AdGuard Blocklist (SAFE)",
+        safe_report,
+    )
+    write_blocklist(
+        aggressive_out,
+        aggressive_rules,
+        "royerlraph79 AdGuard Blocklist (AGGRESSIVE)",
+        aggressive_report,
+    )
 
+    logging.info("[SAFE] rules=%d keyword_rules=%d tld_rules=%d",
+                 len(safe_rules), safe_report.keyword_collapse_rules, safe_report.tld_collapse_rules)
+    logging.info("[AGGRESSIVE] rules=%d keyword_rules=%d tld_rules=%d",
+                 len(aggressive_rules), aggressive_report.keyword_collapse_rules, aggressive_report.tld_collapse_rules)
+
+    logging.info("Wrote: %s", safe_out)
+    logging.info("Wrote: %s", aggressive_out)
     logging.info("Done.")
 
 if __name__ == "__main__":
