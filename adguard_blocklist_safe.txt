@@ -1,6 +1,6 @@
 ! Title: royerlraph79 AdGuard Blocklist (SAFE)
 ! Expires: 24 hours
-! Generated: Fri Feb 27 01:58:25 2026 UTC
+! Generated: Fri Feb 27 02:03:58 2026 UTC
 ! Rules: 0
 ! Keyword collapses: 0 (domains matched: 0)
 ! TLD collapses: 0 (registrables collapsed: 0)
