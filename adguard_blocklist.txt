@@ -1,6 +1,6 @@
 ! Title: royerlraph79 AdGuard Blocklist
 ! Expires: 24 hours
-! Generated: Sat Mar 07 14:42:11 2026 EST
+! Generated: Sat Mar 07 14:46:40 2026 EST
 ! Entries: 230426
 ! Reductions: 190864
 ! Fetch failures: 0
