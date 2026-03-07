@@ -27,8 +27,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 🔎 Show repo state
+        run: |
+          echo "== Branch =="
+          git branch --show-current || true
+
+          echo
+          echo "== Files =="
+          ls -la || true
+          ls -la .github/workflows || true
+
+          echo
+          echo "== convert_hosts.py first 40 lines =="
+          sed -n '1,40p' convert_hosts.py || true
+
       - name: ⚙️ Generate blocklist
         run: |
+          set -euxo pipefail
+
+          rm -f adguard_blocklist.txt
+
           echo "📍 STARTING convert_hosts.py"
           python convert_hosts.py \
             --wildcardize-keywords \
@@ -36,6 +54,30 @@ jobs:
             --collapse-registrable \
             -v
           echo "✅ FINISHED convert_hosts.py"
+
+          echo
+          echo "== Output file info =="
+          ls -lh adguard_blocklist.txt
+          wc -c adguard_blocklist.txt
+          wc -l adguard_blocklist.txt
+
+      - name: 🧪 Validate generated file
+        run: |
+          set -euxo pipefail
+
+          test -f adguard_blocklist.txt
+          test -s adguard_blocklist.txt
+
+          RULES=$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)
+
+          echo "Detected rule count: $RULES"
+
+          if [ "$RULES" -eq 0 ]; then
+            echo "❌ Generated file contains zero rules"
+            echo "== Full file dump =="
+            cat adguard_blocklist.txt || true
+            exit 1
+          fi
 
       - name: 👀 Preview output
         run: |
@@ -70,6 +112,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          git add -A
+          git add adguard_blocklist.txt convert_hosts.py .github/workflows/update.yml requirements.txt
           git commit -m "🔄 Auto-update blocklist [skip ci]"
           git push
