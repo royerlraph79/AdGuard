@@ -1,7 +1,7 @@
 ! Title: royerlraph79 AdGuard Blocklist
 ! Expires: 24 hours
-! Generated: Sat Mar 07 17:53:19 2026 UTC
-! Domains: 263300
+! Generated: Sat Mar 07 18:04:09 2026 UTC
+! Entries: 263300
 
 ||0-02.net^
 ||0-24bpautomentes.hu^
