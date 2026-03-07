@@ -1,7 +1,9 @@
 ! Title: royerlraph79 AdGuard Blocklist
 ! Expires: 24 hours
-! Generated: Sat Mar 07 18:30:47 2026 UTC
-! Entries: 231355
+! Generated: Sat Mar 07 18:40:39 2026 UTC
+! Entries: 231362
+! Reductions: 189814
+! Fetch failures: 0
 
 ||0-02.net^
 ||0-24bpautomentes.hu^
@@ -8731,12 +8733,7 @@
 ||9z6p1shhsh.top^
 ||9ze83xtz5qgt9pn4ph34.cfd^
 ||doubleclick*^
-||googleadservices*^
-||googlesyndication*^
-||outbrain*^
-||pubmatic*^
 ||rubiconproject*^
-||scorecardresearch*^
 ||a--ds.com^
 ||a-1freeman.com^
 ||a-5.info^
@@ -83838,6 +83835,8 @@
 ||googleads-cn.com^
 ||googleads.com^
 ||googleadsapi.com^
+||googleadservices-cn.com^
+||googleadservices.com^
 ||googleadsserving.cn^
 ||googleailesi.com^
 ||googleanalytics.com^
@@ -83868,6 +83867,9 @@
 ||googlesecruity.com^
 ||googleserv.tech^
 ||googlestatisticalserver.com^
+||googlesyndication-cn.com^
+||googlesyndication.com^
+||googlesyndication.wiki^
 ||googletagmanage.com^
 ||googletagmanager-cn.com^
 ||googletagmanager.com^
@@ -153576,6 +153578,9 @@
 ||outbound-mail-google.com^
 ||outboundlink.net^
 ||outbowemparl.cfd^
+||outbrain.com^
+||outbrain.org^
+||outbrainimg.com^
 ||outbutypt.online^
 ||outbyte.com^
 ||outcaconsi.rest^
@@ -166029,6 +166034,8 @@
 ||publy.net^
 ||publyt.com^
 ||publytics.net^
+||pubmatic.co.jp^
+||pubmatic.com^
 ||pubmax.com.pl^
 ||pubmine.com^
 ||pubmnet.com^
@@ -179540,6 +179547,8 @@
 ||scorchsschwa.cyou^
 ||score-media.de^
 ||scoreaisle.com^
+||scorecardresearch.com^
+||scorecardresearch.net^
 ||scorecardrewards.com^
 ||scored.co^
 ||scoredconnect.com^
