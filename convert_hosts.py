@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 from __future__ import annotations
 
 import argparse
@@ -7,12 +6,12 @@ import fnmatch
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import urlsplit
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import tldextract
@@ -38,13 +37,9 @@ VALID_DOMAIN_OR_WILDCARD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Broad AdGuard "host pattern" (not necessarily a valid hostname).
-# Examples: doubleclick*, ads*, *tracker*, foo.bar*, *.example.com, ad*.example.net
 VALID_ADGUARD_HOST_PATTERN_RE = re.compile(r"^[a-z0-9*.-]{2,255}$", re.IGNORECASE)
 
-USER_AGENT = "royerlraph79-AdGuardBlocklist/6.0"
-
-# Use bundled PSL snapshot to avoid network call in CI
+USER_AGENT = "royerlraph79-AdGuardBlocklist/7.0"
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 
 DEFAULT_KEYWORDS = {
@@ -56,13 +51,11 @@ DEFAULT_KEYWORDS = {
     "adservices",
     "adserver",
     "adservers",
-    "ads",
     "advert",
     "advertising",
     "analytics",
     "pixel",
     "tracker",
-    "track",
     "beacon",
     "telemetry",
     "criteo",
@@ -76,6 +69,9 @@ DEFAULT_KEYWORDS = {
     "adform",
     "teads",
 }
+
+MIN_KEYWORD_LENGTH = 5
+MIN_PATTERN_PREFIX_LENGTH = 6
 
 
 def setup_logging(verbose: bool) -> None:
@@ -91,7 +87,8 @@ def make_stats() -> dict[str, int]:
         "plain_domains": 0,
         "ignored_lines": 0,
         "invalid_lines": 0,
-        "added": 0,
+        "parsed_entries": 0,
+        "unique_entries": 0,
     }
 
 
@@ -127,8 +124,7 @@ def extract_from_adblock_rule(line: str) -> str:
         return m.group(1)
 
     if ln.startswith("|http://") or ln.startswith("|https://"):
-        ln2 = ln.lstrip("|")
-        host = urlsplit(ln2).hostname or ""
+        host = urlsplit(ln.lstrip("|")).hostname or ""
         return host
 
     return ""
@@ -149,12 +145,6 @@ def choose_token(raw_line: str) -> tuple[str, str]:
 
 
 def normalize_token_to_entry(token: str) -> str:
-    """
-    Normalize a token to either:
-      - plain host: example.com
-      - wildcard glob host: *.example.com or ad*.example.com
-    Returns "" if invalid/ignored.
-    """
     d = token.strip().lower()
     if not d:
         return ""
@@ -199,13 +189,12 @@ def registrable_domain(host: str) -> str:
     return f"{ext.domain}.{ext.suffix}"
 
 
-class DomainTrie:
-    """
-    Reverse-label trie where inserting a broader domain prunes narrower children.
-      - If any ancestor node has __end__, the domain is already covered => reject.
-      - When inserting, clear children and set __end__ so broader always wins.
-    """
+def sld_of(host: str) -> str:
+    ext = _EXTRACT(host)
+    return ext.domain.lower() if ext.domain else ""
 
+
+class DomainTrie:
     def __init__(self) -> None:
         self.root: dict[str, dict] = {}
 
@@ -224,16 +213,21 @@ class DomainTrie:
 
 
 def dedupe_plain_subdomains(domains: Iterable[str]) -> set[str]:
+    ordered = sorted(set(domains), key=lambda x: (x.count("."), x))
     trie = DomainTrie()
     out: set[str] = set()
-    for d in sorted(domains, key=lambda x: (x.count("."), x)):
+
+    for d in ordered:
         if trie.insert_broader_wins(d):
             out.add(d)
+
+    logging.info("Plain subdomain dedupe: %d -> %d", len(ordered), len(out))
     return out
 
 
 @dataclass(frozen=True)
-class SuffixWildcard:
+class ParsedSuffixWildcard:
+    original: str
     base: str
     min_labels_before_base: int
 
@@ -246,7 +240,7 @@ class SuffixWildcard:
         labels = [p for p in prefix.split(".") if p]
         return len(labels) >= self.min_labels_before_base
 
-    def covers_wildcard(self, other: "SuffixWildcard") -> bool:
+    def covers_wildcard(self, other: "ParsedSuffixWildcard") -> bool:
         if other.base == self.base:
             return self.min_labels_before_base <= other.min_labels_before_base
         if not other.base.endswith("." + self.base):
@@ -257,7 +251,7 @@ class SuffixWildcard:
         return self.min_labels_before_base <= other_implied_before_our_base
 
 
-def parse_suffix_wildcard(pattern: str) -> Optional[SuffixWildcard]:
+def parse_suffix_wildcard(pattern: str) -> Optional[ParsedSuffixWildcard]:
     p = pattern.lower().strip()
     if "*" not in p:
         return None
@@ -284,19 +278,25 @@ def parse_suffix_wildcard(pattern: str) -> Optional[SuffixWildcard]:
     if not VALID_HOST_RE.match(base):
         return None
 
-    return SuffixWildcard(base=base, min_labels_before_base=star_prefix)
+    return ParsedSuffixWildcard(
+        original=p,
+        base=base,
+        min_labels_before_base=star_prefix,
+    )
 
 
-def split_wildcards(wildcards: set[str]) -> tuple[list[SuffixWildcard], list[str]]:
-    suffix: list[SuffixWildcard] = []
+def split_wildcards(wildcards: set[str]) -> tuple[list[ParsedSuffixWildcard], list[str]]:
+    suffix: list[ParsedSuffixWildcard] = []
     complex_globs: list[str] = []
+
     for w in wildcards:
         sw = parse_suffix_wildcard(w)
         if sw is not None:
             suffix.append(sw)
         else:
             complex_globs.append(w.lower())
-    suffix.sort(key=lambda x: (x.base.count("."), x.min_labels_before_base, x.base))
+
+    suffix.sort(key=lambda x: (x.base.count("."), x.min_labels_before_base, x.base, x.original))
     complex_globs.sort()
     return suffix, complex_globs
 
@@ -324,11 +324,11 @@ def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str]) -> s
         return wildcards
 
     out: set[str] = set()
+
     for w in wildcards:
-        base = (w[2:] if w.startswith("*.") else w).lower()
-        parts = base.split(".")
-        redundant = any(".".join(parts[i:]) in plain for i in range(len(parts) - 1))
-        if not redundant:
+        labels = w.lower().split(".")
+        covered = any(".".join(labels[i:]) in plain for i in range(1, len(labels)))
+        if not covered:
             out.add(w)
 
     logging.info("Wildcards removed (covered by plain): %d", len(wildcards) - len(out))
@@ -341,13 +341,12 @@ def remove_redundant_wildcards(wildcards: set[str]) -> set[str]:
 
     suffix_wildcards, complex_globs = split_wildcards(wildcards)
 
-    kept_suffix: list[SuffixWildcard] = []
+    kept_suffix: list[ParsedSuffixWildcard] = []
     for sw in suffix_wildcards:
         if not any(prev.covers_wildcard(sw) for prev in kept_suffix):
             kept_suffix.append(sw)
 
-    kept: set[str] = {"*." * sw.min_labels_before_base + sw.base for sw in kept_suffix}
-    kept |= set(complex_globs)
+    kept = {sw.original for sw in kept_suffix} | set(complex_globs)
 
     logging.info("Wildcard dedupe: %d -> %d", len(wildcards), len(kept))
     return kept
@@ -366,10 +365,10 @@ def dedupe_domains(
     dedupe_plain_covered_by_wildcards: bool,
     collapse_to_registrable: bool,
 ) -> set[str]:
-    wildcards = {d for d in entries if "*" in d}
-    plain = {d for d in entries if "*" not in d}
+    wildcards = {d for d in entries if "*" in d or d.startswith("@pattern ")}
+    plain = {d for d in entries if d not in wildcards}
 
-    logging.info("Plain: %d | Wildcards: %d", len(plain), len(wildcards))
+    logging.info("Plain: %d | Wildcards/patterns: %d", len(plain), len(wildcards))
 
     if collapse_to_registrable:
         plain = collapse_plain_to_registrable(plain)
@@ -377,14 +376,17 @@ def dedupe_domains(
     if dedupe_subdomains:
         plain = dedupe_plain_subdomains(plain)
 
+    actual_wildcards = {w for w in wildcards if not w.startswith("@pattern ")}
+    patterns = {w for w in wildcards if w.startswith("@pattern ")}
+
     if dedupe_plain_covered_by_wildcards:
-        plain = remove_plain_covered_by_wildcards(plain, wildcards)
+        plain = remove_plain_covered_by_wildcards(plain, actual_wildcards)
 
-    wildcards = remove_wildcards_covered_by_plain(plain, wildcards)
-    wildcards = remove_redundant_wildcards(wildcards)
+    actual_wildcards = remove_wildcards_covered_by_plain(plain, actual_wildcards)
+    actual_wildcards = remove_redundant_wildcards(actual_wildcards)
 
-    result = plain | wildcards
-    logging.info("Final total entries: %d", len(result))
+    result = plain | actual_wildcards | patterns
+    logging.info("Final total entries after dedupe: %d", len(result))
     return result
 
 
@@ -415,88 +417,115 @@ def _parse_source_text(text: str) -> tuple[set[str], dict[str, int]]:
             continue
 
         found.add(entry)
-        stats["added"] += 1
+        stats["parsed_entries"] += 1
 
+    stats["unique_entries"] = len(found)
     return found, stats
 
 
-def _fetch_one(session: requests.Session, url: str) -> tuple[str, str]:
-    r = session.get(url, timeout=(10, 60), headers={"User-Agent": USER_AGENT})
-    r.raise_for_status()
-    return url, r.text
+def _fetch_one(url: str) -> tuple[str, str]:
+    with requests.Session() as session:
+        r = session.get(url, timeout=(10, 60), headers={"User-Agent": USER_AGENT})
+        r.raise_for_status()
+        return url, r.text
 
 
 def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[str], dict[str, int]]:
-    """
-    Fetch sources concurrently, parse per-source, then union.
-    Duplicates are computed globally after union.
-    """
     merged: set[str] = set()
     global_stats = make_stats()
-    total_pre_union = 0
+    total_unique_per_source = 0
 
     threads = max(1, threads)
     logging.info("Fetching with threads=%d", threads)
 
-    with requests.Session() as session:
-        with ThreadPoolExecutor(max_workers=threads) as ex:
-            futs = {ex.submit(_fetch_one, session, url): url for url in urls}
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        futs = {ex.submit(_fetch_one, url): url for url in urls}
 
-            for fut in as_completed(futs):
-                url = futs[fut]
-                try:
-                    _, text = fut.result()
-                except RequestException as e:
-                    logging.error("Error fetching %s: %s", url, e)
-                    continue
-                except Exception as e:  # noqa: BLE001
-                    logging.error("Unexpected error fetching %s: %s", url, e)
-                    continue
+        for fut in as_completed(futs):
+            url = futs[fut]
+            try:
+                _, text = fut.result()
+            except RequestException as e:
+                logging.error("Error fetching %s: %s", url, e)
+                continue
+            except Exception as e:
+                logging.error("Unexpected error fetching %s: %s", url, e)
+                continue
 
-                found, stats = _parse_source_text(text)
-                total_pre_union += len(found)
+            found, stats = _parse_source_text(text)
+            total_unique_per_source += len(found)
+            merged |= found
 
-                merged |= found
-                for k in global_stats:
-                    global_stats[k] += stats[k]
+            for k in global_stats:
+                global_stats[k] += stats[k]
 
-                logging.info(
-                    "Done %s | lines=%d parsed=%d invalid=%d ignored=%d",
-                    url,
-                    stats["total_lines"],
-                    len(found),
-                    stats["invalid_lines"],
-                    stats["ignored_lines"],
-                )
+            logging.info(
+                "Done %s | lines=%d unique=%d invalid=%d ignored=%d",
+                url,
+                stats["total_lines"],
+                len(found),
+                stats["invalid_lines"],
+                stats["ignored_lines"],
+            )
 
-    # Compute duplicates approximately as pre-union minus unique.
-    # (This treats duplicates across sources and within a single source similarly.)
-    duplicates = max(0, total_pre_union - len(merged))
-    global_stats["added"] = len(merged)
-    global_stats["skipped"] = global_stats["ignored_lines"] + global_stats["invalid_lines"] + duplicates
-
-    logging.info("Pre-union parsed entries: %d", total_pre_union)
-    logging.info("Unique entries after union: %d", len(merged))
-    logging.info("Estimated duplicates: %d", duplicates)
+    global_stats["unique_entries"] = len(merged)
+    logging.info("Per-source unique entries total: %d", total_unique_per_source)
+    logging.info("Global unique entries after union: %d", len(merged))
+    logging.info("Cross-source overlap estimate: %d", max(0, total_unique_per_source - len(merged)))
 
     return merged, global_stats
 
 
 def _read_keyword_allowlist(path: Optional[str]) -> set[str]:
     if not path:
-        return set(DEFAULT_KEYWORDS)
+        return {k for k in DEFAULT_KEYWORDS if len(k) >= MIN_KEYWORD_LENGTH}
+
     p = Path(path)
     if not p.exists():
         logging.error("Keyword allowlist not found: %s (using defaults)", path)
-        return set(DEFAULT_KEYWORDS)
+        return {k for k in DEFAULT_KEYWORDS if len(k) >= MIN_KEYWORD_LENGTH}
+
     kws: set[str] = set()
     for line in p.read_text(encoding="utf-8").splitlines():
         s = line.strip().lower()
         if not s or s.startswith(COMMENT_PREFIXES):
             continue
-        if re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", s):
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", s) and len(s) >= MIN_KEYWORD_LENGTH:
             kws.add(s)
-    return kws or set(DEFAULT_KEYWORDS)
+
+    return kws or {k for k in DEFAULT_KEYWORDS if len(k) >= MIN_KEYWORD_LENGTH}
+
+
+def _longest_common_prefix(values: Iterable[str]) -> str:
+    vals = sorted(set(values))
+    if not vals:
+        return ""
+    if len(vals) == 1:
+        return vals[0]
+
+    first = vals[0]
+    last = vals[-1]
+    i = 0
+    limit = min(len(first), len(last))
+    while i < limit and first[i] == last[i]:
+        i += 1
+    return first[:i]
+
+
+def _trim_pattern_prefix(prefix: str, keyword: str) -> str:
+    s = prefix.lower().strip("-.*")
+    s = re.sub(r"[^a-z0-9-]+", "", s)
+    if len(s) < max(MIN_PATTERN_PREFIX_LENGTH, len(keyword)):
+        return ""
+    if not s.startswith(keyword):
+        return ""
+    return s.rstrip("-")
+
+
+def _keyword_pattern_covers_host(pattern_prefix: str, host: str) -> bool:
+    rd = registrable_domain(host)
+    sld = sld_of(rd)
+    return bool(sld) and sld.startswith(pattern_prefix)
 
 
 def wildcardize_keywords(
@@ -506,54 +535,64 @@ def wildcardize_keywords(
     keyword_threshold: int,
     keyword_allowlist_path: Optional[str],
 ) -> set[str]:
-    """
-    Convert many domains containing certain keywords into one AdGuard host-pattern:
-      domains that include 'doubleclick' => add 'PATTERN:doubleclick*' and remove those domains
-
-    Only uses allowlisted keywords and requires threshold count to trigger.
-    This is intentionally broad; keep it opt-in.
-
-    Representation:
-      - Normal entries: "example.com" or "*.example.com" or "ad*.example.com"
-      - Pattern entries: "@pattern doubleclick*" (internal), later emitted as ||doubleclick*^
-    """
     if not enabled:
         return entries
 
     keyword_threshold = max(2, keyword_threshold)
     allow = _read_keyword_allowlist(keyword_allowlist_path)
 
-    plain = {e for e in entries if "*" not in e}
-    # For keyword reduction, we only consider plain domains (validated hosts).
-    # Wildcard globs are left intact.
+    plain = {e for e in entries if "*" not in e and not e.startswith("@pattern ")}
     keep_other = entries - plain
 
-    keyword_hits: dict[str, set[str]] = {k: set() for k in allow}
+    groups: dict[str, set[str]] = {k: set() for k in allow}
+    sld_groups: dict[str, set[str]] = {k: set() for k in allow}
 
     for host in plain:
         rd = registrable_domain(host)
-        sld = rd.split(".", 1)[0]
+        sld = sld_of(rd)
+        if not sld:
+            continue
         for kw in allow:
             if kw in sld:
-                keyword_hits[kw].add(host)
+                groups[kw].add(host)
+                sld_groups[kw].add(sld)
 
     patterns: set[str] = set()
     removed: set[str] = set()
 
-    for kw, hosts in keyword_hits.items():
-        if len(hosts) >= keyword_threshold:
-            pat = f"@pattern {kw}*"
-            patterns.add(pat)
-            removed |= hosts
+    for kw in sorted(allow):
+        hosts = groups[kw]
+        if len(hosts) < keyword_threshold:
+            continue
+
+        prefix = _trim_pattern_prefix(_longest_common_prefix(sld_groups[kw]), kw)
+        if not prefix:
+            continue
+
+        covered_hosts = {h for h in hosts if _keyword_pattern_covers_host(prefix, h)}
+        if len(covered_hosts) < keyword_threshold:
+            continue
+
+        pattern = f"@pattern {prefix}*"
+        patterns.add(pattern)
+        removed |= covered_hosts
+
+        logging.warning(
+            "Keyword pattern created: %s from keyword=%s hosts=%d slds=%d",
+            pattern,
+            kw,
+            len(covered_hosts),
+            len(sld_groups[kw]),
+        )
 
     if patterns:
         logging.warning(
-            "Keyword wildcardization enabled: added %d patterns, removed %d domains "
-            "(threshold=%d). This may over-block.",
+            "Keyword wildcardization enabled: added %d patterns, removed %d domains. Validate carefully.",
             len(patterns),
             len(removed),
-            keyword_threshold,
         )
+    else:
+        logging.info("Keyword wildcardization enabled, but no patterns met the threshold.")
 
     return (plain - removed) | keep_other | patterns
 
@@ -591,45 +630,42 @@ def main() -> None:
     parser.add_argument("-s", "--source", default="sources.txt", help="Path to sources file")
     parser.add_argument("-o", "--output", default="adguard_blocklist.txt", help="Output file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
-
     parser.add_argument(
         "--threads",
         type=int,
         default=min(32, (os.cpu_count() or 4) * 4),
-        help="Number of fetch threads (I/O bound).",
+        help="Number of fetch threads",
     )
-
     parser.add_argument(
         "--collapse-registrable",
         action="store_true",
-        help="Collapse plain domains to registrable domains (aggressive; may over-block).",
+        help="Collapse plain domains to registrable domains",
     )
     parser.add_argument(
         "--no-dedupe-subdomains",
         action="store_true",
-        help="Disable plain subdomain deduplication.",
+        help="Disable plain subdomain deduplication",
     )
     parser.add_argument(
         "--no-dedupe-plain-covered-by-wildcards",
         action="store_true",
-        help="Disable removing plain domains covered by wildcard patterns.",
+        help="Disable removing plain domains covered by wildcard patterns",
     )
-
     parser.add_argument(
         "--wildcardize-keywords",
         action="store_true",
-        help="Reduce many 'obvious adserver' domains into broad keyword patterns like ||doubleclick*^ (very aggressive).",
+        help="Generate broad keyword host-patterns like ||doubleclick*^",
     )
     parser.add_argument(
         "--keyword-threshold",
         type=int,
         default=10,
-        help="Minimum number of domains hit by a keyword before creating a keyword pattern.",
+        help="Minimum number of hosts for keyword pattern creation",
     )
     parser.add_argument(
         "--keyword-allowlist",
         default=None,
-        help="Path to allowlisted keywords (one per line). If omitted, uses built-in defaults.",
+        help="Path to keyword allowlist file",
     )
 
     args = parser.parse_args()
@@ -647,6 +683,7 @@ def main() -> None:
         for line in source_path.read_text(encoding="utf-8").splitlines()
         if not is_comment_or_empty(line)
     ]
+
     if not urls:
         logging.error("No sources found in %s", source_path)
         return
@@ -657,7 +694,6 @@ def main() -> None:
     logging.info("Raw unique entries: %d", len(raw_entries))
     logging.info("Global stats: %s", global_stats)
 
-    # Dedupe domain/wildcard entries first
     deduped = dedupe_domains(
         raw_entries,
         dedupe_subdomains=not args.no_dedupe_subdomains,
@@ -665,7 +701,6 @@ def main() -> None:
         collapse_to_registrable=args.collapse_registrable,
     )
 
-    # Optional aggressive keyword wildcard reduction
     final_entries = wildcardize_keywords(
         deduped,
         enabled=args.wildcardize_keywords,
