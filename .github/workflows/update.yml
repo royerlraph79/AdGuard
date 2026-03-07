@@ -92,7 +92,6 @@ jobs:
             --source sources.txt \
             --output adguard_blocklist.txt \
             --threads 16 \
-            --collapse-registrable \
             --dedupe-wildcards-conservative \
             -v
 
