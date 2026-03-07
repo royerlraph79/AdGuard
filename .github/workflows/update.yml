@@ -30,7 +30,12 @@ jobs:
       - name: ⚙️ Generate blocklist
         run: |
           echo "📍 STARTING convert_hosts.py"
-          python convert_hosts.py
+          python convert_hosts.py \
+            -s sources.txt \
+            -o adguard_blocklist.txt \
+            --collapse-registrable \
+            --wildcardize-keywords \
+            --keyword-threshold 2
           echo "✅ FINISHED convert_hosts.py"
 
       - name: 👀 Preview output
