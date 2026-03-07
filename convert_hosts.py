@@ -6,6 +6,7 @@ import fnmatch
 import logging
 import os
 import re
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,7 +40,7 @@ VALID_DOMAIN_OR_WILDCARD_RE = re.compile(
 
 VALID_ADGUARD_HOST_PATTERN_RE = re.compile(r"^[a-z0-9*.-]{2,255}$", re.IGNORECASE)
 
-USER_AGENT = "royerlraph79-AdGuardBlocklist/7.0"
+USER_AGENT = "royerlraph79-AdGuardBlocklist/8.1"
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 
 DEFAULT_KEYWORDS = {
@@ -74,6 +75,60 @@ MIN_KEYWORD_LENGTH = 5
 MIN_PATTERN_PREFIX_LENGTH = 6
 
 
+@dataclass(frozen=True)
+class ParsedSuffixWildcard:
+    original: str
+    base: str
+    min_labels_before_base: int
+
+    def covers_plain(self, host: str) -> bool:
+        if host == self.base:
+            return False
+        if not host.endswith("." + self.base):
+            return False
+        prefix = host[: -(len(self.base) + 1)]
+        labels = [p for p in prefix.split(".") if p]
+        return len(labels) >= self.min_labels_before_base
+
+    def covers_wildcard(self, other: "ParsedSuffixWildcard") -> bool:
+        if other.base == self.base:
+            return self.min_labels_before_base <= other.min_labels_before_base
+        if not other.base.endswith("." + self.base):
+            return False
+        extra_prefix = other.base[: -(len(self.base) + 1)]
+        extra_labels = [p for p in extra_prefix.split(".") if p]
+        other_implied_before_our_base = other.min_labels_before_base + len(extra_labels)
+        return self.min_labels_before_base <= other_implied_before_our_base
+
+
+@dataclass
+class ReductionEvent:
+    phase: str
+    original: str
+    replacement: str
+    detail: str
+
+
+class ReductionReport:
+    def __init__(self) -> None:
+        self.events: list[ReductionEvent] = []
+        self.phase_counts: Counter[str] = Counter()
+        self.keyword_pattern_host_counts: Counter[str] = Counter()
+        self.keyword_pattern_sld_counts: dict[str, int] = {}
+        self.source_stats: list[dict[str, object]] = []
+
+    def add(self, phase: str, original: str, replacement: str, detail: str = "") -> None:
+        self.events.append(ReductionEvent(phase, original, replacement, detail))
+        self.phase_counts[phase] += 1
+
+    def add_source_stat(self, data: dict[str, object]) -> None:
+        self.source_stats.append(data)
+
+    def top_events(self, phase: str, limit: int = 10) -> list[tuple[str, int]]:
+        counter = Counter(e.replacement for e in self.events if e.phase == phase)
+        return counter.most_common(limit)
+
+
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -89,6 +144,7 @@ def make_stats() -> dict[str, int]:
         "invalid_lines": 0,
         "parsed_entries": 0,
         "unique_entries": 0,
+        "fetch_failures": 0,
     }
 
 
@@ -212,7 +268,16 @@ class DomainTrie:
         return True
 
 
-def dedupe_plain_subdomains(domains: Iterable[str]) -> set[str]:
+def find_covering_parent_domain(domain: str, existing: set[str]) -> Optional[str]:
+    parts = domain.split(".")
+    for i in range(1, len(parts) - 1):
+        candidate = ".".join(parts[i:])
+        if candidate in existing:
+            return candidate
+    return None
+
+
+def dedupe_plain_subdomains(domains: Iterable[str], report: ReductionReport) -> set[str]:
     ordered = sorted(set(domains), key=lambda x: (x.count("."), x))
     trie = DomainTrie()
     out: set[str] = set()
@@ -220,35 +285,12 @@ def dedupe_plain_subdomains(domains: Iterable[str]) -> set[str]:
     for d in ordered:
         if trie.insert_broader_wins(d):
             out.add(d)
+        else:
+            parent = find_covering_parent_domain(d, out)
+            report.add("subdomain_pruned", d, parent or "", "broader plain domain already present")
 
     logging.info("Plain subdomain dedupe: %d -> %d", len(ordered), len(out))
     return out
-
-
-@dataclass(frozen=True)
-class ParsedSuffixWildcard:
-    original: str
-    base: str
-    min_labels_before_base: int
-
-    def covers_plain(self, host: str) -> bool:
-        if host == self.base:
-            return False
-        if not host.endswith("." + self.base):
-            return False
-        prefix = host[: -(len(self.base) + 1)]
-        labels = [p for p in prefix.split(".") if p]
-        return len(labels) >= self.min_labels_before_base
-
-    def covers_wildcard(self, other: "ParsedSuffixWildcard") -> bool:
-        if other.base == self.base:
-            return self.min_labels_before_base <= other.min_labels_before_base
-        if not other.base.endswith("." + self.base):
-            return False
-        extra_prefix = other.base[: -(len(self.base) + 1)]
-        extra_labels = [p for p in extra_prefix.split(".") if p]
-        other_implied_before_our_base = other.min_labels_before_base + len(extra_labels)
-        return self.min_labels_before_base <= other_implied_before_our_base
 
 
 def parse_suffix_wildcard(pattern: str) -> Optional[ParsedSuffixWildcard]:
@@ -301,7 +343,7 @@ def split_wildcards(wildcards: set[str]) -> tuple[list[ParsedSuffixWildcard], li
     return suffix, complex_globs
 
 
-def remove_plain_covered_by_wildcards(plain: set[str], wildcards: set[str]) -> set[str]:
+def remove_plain_covered_by_wildcards(plain: set[str], wildcards: set[str], report: ReductionReport) -> set[str]:
     if not wildcards or not plain:
         return plain
 
@@ -309,17 +351,29 @@ def remove_plain_covered_by_wildcards(plain: set[str], wildcards: set[str]) -> s
     out: set[str] = set()
 
     for host in plain:
-        covered = any(sw.covers_plain(host) for sw in suffix_wildcards)
-        if not covered and complex_globs:
-            covered = any(fnmatch.fnmatchcase(host, g) for g in complex_globs)
-        if not covered:
+        covered_by = None
+
+        for sw in suffix_wildcards:
+            if sw.covers_plain(host):
+                covered_by = sw.original
+                break
+
+        if covered_by is None and complex_globs:
+            for g in complex_globs:
+                if fnmatch.fnmatchcase(host, g):
+                    covered_by = g
+                    break
+
+        if covered_by is None:
             out.add(host)
+        else:
+            report.add("plain_removed_by_wildcard", host, covered_by, "plain covered by wildcard")
 
     logging.info("Plain domains removed (covered by wildcards): %d", len(plain) - len(out))
     return out
 
 
-def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str]) -> set[str]:
+def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str], report: ReductionReport) -> set[str]:
     if not plain or not wildcards:
         return wildcards
 
@@ -327,15 +381,24 @@ def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str]) -> s
 
     for w in wildcards:
         labels = w.lower().split(".")
-        covered = any(".".join(labels[i:]) in plain for i in range(1, len(labels)))
-        if not covered:
+        covered_by = None
+
+        for i in range(1, len(labels)):
+            candidate = ".".join(labels[i:])
+            if candidate in plain:
+                covered_by = candidate
+                break
+
+        if covered_by is None:
             out.add(w)
+        else:
+            report.add("wildcard_removed_by_plain", w, covered_by, "wildcard covered by plain suffix")
 
     logging.info("Wildcards removed (covered by plain): %d", len(wildcards) - len(out))
     return out
 
 
-def remove_redundant_wildcards(wildcards: set[str]) -> set[str]:
+def remove_redundant_wildcards(wildcards: set[str], report: ReductionReport) -> set[str]:
     if not wildcards:
         return wildcards
 
@@ -343,8 +406,16 @@ def remove_redundant_wildcards(wildcards: set[str]) -> set[str]:
 
     kept_suffix: list[ParsedSuffixWildcard] = []
     for sw in suffix_wildcards:
-        if not any(prev.covers_wildcard(sw) for prev in kept_suffix):
+        covered_by = None
+        for prev in kept_suffix:
+            if prev.covers_wildcard(sw):
+                covered_by = prev.original
+                break
+
+        if covered_by is None:
             kept_suffix.append(sw)
+        else:
+            report.add("wildcard_removed_by_wildcard", sw.original, covered_by, "wildcard covered by broader wildcard")
 
     kept = {sw.original for sw in kept_suffix} | set(complex_globs)
 
@@ -352,8 +423,20 @@ def remove_redundant_wildcards(wildcards: set[str]) -> set[str]:
     return kept
 
 
-def collapse_plain_to_registrable(domains: set[str]) -> set[str]:
-    collapsed = {registrable_domain(d) for d in domains}
+def collapse_plain_to_registrable(domains: set[str], report: ReductionReport) -> set[str]:
+    collapsed_map: dict[str, set[str]] = defaultdict(set)
+
+    for d in domains:
+        rd = registrable_domain(d)
+        collapsed_map[rd].add(d)
+
+    collapsed = set(collapsed_map)
+
+    for rd, originals in collapsed_map.items():
+        for original in originals:
+            if original != rd:
+                report.add("registrable_collapse", original, rd, "collapsed to registrable domain")
+
     logging.info("Registrable collapse: %d -> %d", len(domains), len(collapsed))
     return collapsed
 
@@ -364,6 +447,7 @@ def dedupe_domains(
     dedupe_subdomains: bool,
     dedupe_plain_covered_by_wildcards: bool,
     collapse_to_registrable: bool,
+    report: ReductionReport,
 ) -> set[str]:
     wildcards = {d for d in entries if "*" in d or d.startswith("@pattern ")}
     plain = {d for d in entries if d not in wildcards}
@@ -371,19 +455,19 @@ def dedupe_domains(
     logging.info("Plain: %d | Wildcards/patterns: %d", len(plain), len(wildcards))
 
     if collapse_to_registrable:
-        plain = collapse_plain_to_registrable(plain)
+        plain = collapse_plain_to_registrable(plain, report)
 
     if dedupe_subdomains:
-        plain = dedupe_plain_subdomains(plain)
+        plain = dedupe_plain_subdomains(plain, report)
 
     actual_wildcards = {w for w in wildcards if not w.startswith("@pattern ")}
     patterns = {w for w in wildcards if w.startswith("@pattern ")}
 
     if dedupe_plain_covered_by_wildcards:
-        plain = remove_plain_covered_by_wildcards(plain, actual_wildcards)
+        plain = remove_plain_covered_by_wildcards(plain, actual_wildcards, report)
 
-    actual_wildcards = remove_wildcards_covered_by_plain(plain, actual_wildcards)
-    actual_wildcards = remove_redundant_wildcards(actual_wildcards)
+    actual_wildcards = remove_wildcards_covered_by_plain(plain, actual_wildcards, report)
+    actual_wildcards = remove_redundant_wildcards(actual_wildcards, report)
 
     result = plain | actual_wildcards | patterns
     logging.info("Final total entries after dedupe: %d", len(result))
@@ -430,7 +514,7 @@ def _fetch_one(url: str) -> tuple[str, str]:
         return url, r.text
 
 
-def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[str], dict[str, int]]:
+def load_all_sources_concurrently(urls: list[str], threads: int, report: ReductionReport) -> tuple[set[str], dict[str, int]]:
     merged: set[str] = set()
     global_stats = make_stats()
     total_unique_per_source = 0
@@ -447,9 +531,25 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
                 _, text = fut.result()
             except RequestException as e:
                 logging.error("Error fetching %s: %s", url, e)
+                global_stats["fetch_failures"] += 1
+                report.add_source_stat(
+                    {
+                        "url": url,
+                        "status": "fetch_failed",
+                        "error": str(e),
+                    }
+                )
                 continue
             except Exception as e:
                 logging.error("Unexpected error fetching %s: %s", url, e)
+                global_stats["fetch_failures"] += 1
+                report.add_source_stat(
+                    {
+                        "url": url,
+                        "status": "fetch_failed",
+                        "error": str(e),
+                    }
+                )
                 continue
 
             found, stats = _parse_source_text(text)
@@ -457,7 +557,19 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
             merged |= found
 
             for k in global_stats:
-                global_stats[k] += stats[k]
+                if k in stats:
+                    global_stats[k] += stats[k]
+
+            report.add_source_stat(
+                {
+                    "url": url,
+                    "status": "ok",
+                    "lines": stats["total_lines"],
+                    "unique_entries": len(found),
+                    "invalid_lines": stats["invalid_lines"],
+                    "ignored_lines": stats["ignored_lines"],
+                }
+            )
 
             logging.info(
                 "Done %s | lines=%d unique=%d invalid=%d ignored=%d",
@@ -534,6 +646,7 @@ def wildcardize_keywords(
     enabled: bool,
     keyword_threshold: int,
     keyword_allowlist_path: Optional[str],
+    report: ReductionReport,
 ) -> set[str]:
     if not enabled:
         return entries
@@ -577,6 +690,17 @@ def wildcardize_keywords(
         patterns.add(pattern)
         removed |= covered_hosts
 
+        report.keyword_pattern_host_counts[pattern] = len(covered_hosts)
+        report.keyword_pattern_sld_counts[pattern] = len(sld_groups[kw])
+
+        for host in sorted(covered_hosts):
+            report.add(
+                "keyword_wildcardized",
+                host,
+                pattern,
+                f"keyword={kw}",
+            )
+
         logging.warning(
             "Keyword pattern created: %s from keyword=%s hosts=%d slds=%d",
             pattern,
@@ -597,7 +721,7 @@ def wildcardize_keywords(
     return (plain - removed) | keep_other | patterns
 
 
-def write_output(output_path: Path, entries: set[str]) -> None:
+def write_output(output_path: Path, entries: set[str], report: ReductionReport) -> None:
     logging.info("Writing output to %s", output_path)
     now = datetime.now(timezone.utc).strftime("%a %b %d %H:%M:%S %Y UTC")
 
@@ -605,7 +729,9 @@ def write_output(output_path: Path, entries: set[str]) -> None:
         "! Title: royerlraph79 AdGuard Blocklist\n"
         "! Expires: 24 hours\n"
         f"! Generated: {now}\n"
-        f"! Entries: {len(entries)}\n\n"
+        f"! Entries: {len(entries)}\n"
+        f"! Reductions: {len(report.events)}\n"
+        f"! Fetch failures: {sum(1 for s in report.source_stats if s.get('status') != 'ok')}\n\n"
     )
 
     def emit(entry: str) -> str:
@@ -623,6 +749,24 @@ def write_output(output_path: Path, entries: set[str]) -> None:
             lines.append(line)
 
     output_path.write_text(header + "".join(lines), encoding="utf-8")
+
+
+def log_report_summary(report: ReductionReport) -> None:
+    logging.info("Reduction events total: %d", len(report.events))
+
+    for phase, count in sorted(report.phase_counts.items()):
+        logging.info("Reduction phase %-30s -> %d", phase, count)
+
+    if report.keyword_pattern_host_counts:
+        logging.info("Top keyword wildcard patterns:")
+        for pattern, count in report.keyword_pattern_host_counts.most_common(10):
+            slds = report.keyword_pattern_sld_counts.get(pattern, 0)
+            logging.info("  %s hosts=%d slds=%d", pattern, count, slds)
+
+    if report.source_stats:
+        ok = sum(1 for s in report.source_stats if s.get("status") == "ok")
+        failed = sum(1 for s in report.source_stats if s.get("status") != "ok")
+        logging.info("Source fetch summary: ok=%d failed=%d", ok, failed)
 
 
 def main() -> None:
@@ -676,7 +820,7 @@ def main() -> None:
 
     if not source_path.exists():
         logging.error("Source file not found: %s", source_path)
-        return
+        raise SystemExit(1)
 
     urls = [
         line.strip()
@@ -686,11 +830,13 @@ def main() -> None:
 
     if not urls:
         logging.error("No sources found in %s", source_path)
-        return
+        raise SystemExit(1)
+
+    report = ReductionReport()
 
     logging.info("Starting blocklist generation | sources=%d", len(urls))
 
-    raw_entries, global_stats = load_all_sources_concurrently(urls, threads=args.threads)
+    raw_entries, global_stats = load_all_sources_concurrently(urls, threads=args.threads, report=report)
     logging.info("Raw unique entries: %d", len(raw_entries))
     logging.info("Global stats: %s", global_stats)
 
@@ -699,6 +845,7 @@ def main() -> None:
         dedupe_subdomains=not args.no_dedupe_subdomains,
         dedupe_plain_covered_by_wildcards=not args.no_dedupe_plain_covered_by_wildcards,
         collapse_to_registrable=args.collapse_registrable,
+        report=report,
     )
 
     final_entries = wildcardize_keywords(
@@ -706,10 +853,12 @@ def main() -> None:
         enabled=args.wildcardize_keywords,
         keyword_threshold=args.keyword_threshold,
         keyword_allowlist_path=args.keyword_allowlist,
+        report=report,
     )
 
     logging.info("Final entries: %d", len(final_entries))
-    write_output(output_path, final_entries)
+    write_output(output_path, final_entries, report)
+    log_report_summary(report)
     logging.info("Done.")
 
 
