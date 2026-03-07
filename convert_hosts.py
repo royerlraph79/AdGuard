@@ -717,4 +717,149 @@ def wildcardize_keywords(
     else:
         logging.info("Keyword wildcardization enabled, but no patterns met the threshold.")
 
-    return (plain - removed) | keep
+    return (plain - removed) | keep_other | patterns
+
+
+def write_output(output_path: Path, entries: set[str], report: ReductionReport) -> None:
+    logging.info("Writing output to %s", output_path)
+    now = datetime.now(OUTPUT_TIMEZONE).strftime("%a %b %d %H:%M:%S %Y %Z")
+
+    header = (
+        "! Title: royerlraph79 AdGuard Blocklist\n"
+        "! Expires: 24 hours\n"
+        f"! Generated: {now}\n"
+        f"! Entries: {len(entries)}\n"
+        f"! Reductions: {len(report.events)}\n"
+        f"! Fetch failures: {sum(1 for s in report.source_stats if s.get('status') != 'ok')}\n\n"
+    )
+
+    def emit(entry: str) -> str:
+        if entry.startswith("@pattern "):
+            pat = entry.removeprefix("@pattern ").strip().lower()
+            if not pat or not VALID_ADGUARD_HOST_PATTERN_RE.match(pat):
+                return ""
+            return f"||{pat}^\n"
+        return f"||{entry}^\n"
+
+    lines = []
+    for e in sorted(entries):
+        line = emit(e)
+        if line:
+            lines.append(line)
+
+    output_path.write_text(header + "".join(lines), encoding="utf-8")
+
+
+def log_report_summary(report: ReductionReport) -> None:
+    logging.info("Reduction events total: %d", len(report.events))
+
+    for phase, count in sorted(report.phase_counts.items()):
+        logging.info("Reduction phase %-30s -> %d", phase, count)
+
+    if report.keyword_pattern_host_counts:
+        logging.info("Top keyword wildcard patterns:")
+        for pattern, count in report.keyword_pattern_host_counts.most_common(10):
+            slds = report.keyword_pattern_sld_counts.get(pattern, 0)
+            logging.info("  %s hosts=%d slds=%d", pattern, count, slds)
+
+    if report.source_stats:
+        ok = sum(1 for s in report.source_stats if s.get("status") == "ok")
+        failed = sum(1 for s in report.source_stats if s.get("status") != "ok")
+        logging.info("Source fetch summary: ok=%d failed=%d", ok, failed)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate optimized AdGuard blocklist.")
+    parser.add_argument("-s", "--source", default="sources.txt", help="Path to sources file")
+    parser.add_argument("-o", "--output", default="adguard_blocklist.txt", help="Output file")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=min(32, (os.cpu_count() or 4) * 4),
+        help="Number of fetch threads",
+    )
+    parser.add_argument(
+        "--collapse-registrable",
+        action="store_true",
+        help="Collapse plain domains to registrable domains",
+    )
+    parser.add_argument(
+        "--no-dedupe-subdomains",
+        action="store_true",
+        help="Disable plain subdomain deduplication",
+    )
+    parser.add_argument(
+        "--no-dedupe-plain-covered-by-wildcards",
+        action="store_true",
+        help="Disable removing plain domains covered by wildcard patterns",
+    )
+    parser.add_argument(
+        "--wildcardize-keywords",
+        action="store_true",
+        help="Generate broad keyword host-patterns like ||*doubleclick*^",
+    )
+    parser.add_argument(
+        "--keyword-threshold",
+        type=int,
+        default=10,
+        help="Minimum number of hosts for keyword pattern creation",
+    )
+    parser.add_argument(
+        "--keyword-allowlist",
+        default=None,
+        help="Path to keyword allowlist file",
+    )
+
+    args = parser.parse_args()
+    setup_logging(args.verbose)
+
+    source_path = Path(args.source)
+    output_path = Path(args.output)
+
+    if not source_path.exists():
+        logging.error("Source file not found: %s", source_path)
+        raise SystemExit(1)
+
+    urls = [
+        line.strip()
+        for line in source_path.read_text(encoding="utf-8").splitlines()
+        if not is_comment_or_empty(line)
+    ]
+
+    if not urls:
+        logging.error("No sources found in %s", source_path)
+        raise SystemExit(1)
+
+    report = ReductionReport()
+
+    logging.info("Starting blocklist generation | sources=%d", len(urls))
+
+    raw_entries, global_stats = load_all_sources_concurrently(urls, threads=args.threads, report=report)
+    logging.info("Raw unique entries: %d", len(raw_entries))
+    logging.info("Global stats: %s", global_stats)
+
+    deduped = dedupe_domains(
+        raw_entries,
+        dedupe_subdomains=not args.no_dedupe_subdomains,
+        dedupe_plain_covered_by_wildcards=not args.no_dedupe_plain_covered_by_wildcards,
+        collapse_to_registrable=args.collapse_registrable,
+        report=report,
+    )
+
+    final_entries = wildcardize_keywords(
+        deduped,
+        enabled=args.wildcardize_keywords,
+        keyword_threshold=args.keyword_threshold,
+        keyword_allowlist_path=args.keyword_allowlist,
+        report=report,
+    )
+
+    logging.info("Final entries: %d", len(final_entries))
+    write_output(output_path, final_entries, report)
+    log_report_summary(report)
+    logging.info("Done.")
+
+
+if __name__ == "__main__":
+    main()
