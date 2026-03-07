@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import requests
+import tldextract
 from requests import RequestException
 
 # ============================================================
@@ -37,11 +38,12 @@ VALID_DOMAIN_OR_WILDCARD_RE = re.compile(
     re.IGNORECASE,
 )
 
-USER_AGENT = "royerlraph79-AdGuardBlocklist/3.0"
+USER_AGENT = "royerlraph79-AdGuardBlocklist/4.0"
 
 DEDUP_SUBDOMAINS = True
 DEDUP_PLAIN_COVERED_BY_WILDCARDS = True
 DEDUP_WILDCARDS_CONSERVATIVE = False
+COLLAPSE_TO_REGISTRABLE = True
 
 # ============================================================
 # Logging Setup
@@ -229,6 +231,28 @@ def conservative_wildcard_prune(wildcards: set[str]) -> set[str]:
 
     return pruned
 
+# ============================================================
+# Registrable-domain collapse
+# ============================================================
+
+def registrable_domain(host: str) -> str:
+    ext = tldextract.extract(host)
+    if not ext.domain or not ext.suffix:
+        return host
+    return f"{ext.domain}.{ext.suffix}"
+
+def collapse_plain_to_registrable(domains: set[str]) -> set[str]:
+    logging.info("Collapsing plain domains to registrable domains...")
+
+    collapsed = {registrable_domain(d) for d in domains}
+
+    logging.info(
+        "Registrable collapse complete: %d -> %d",
+        len(domains),
+        len(collapsed),
+    )
+    return collapsed
+
 def dedupe_domains(domains: set[str]) -> set[str]:
     logging.info("Starting final deduplication pipeline...")
 
@@ -237,6 +261,9 @@ def dedupe_domains(domains: set[str]) -> set[str]:
 
     logging.info("Plain domains before dedupe: %d", len(plain))
     logging.info("Wildcard patterns before dedupe: %d", len(wildcards))
+
+    if COLLAPSE_TO_REGISTRABLE:
+        plain = collapse_plain_to_registrable(plain)
 
     if DEDUP_SUBDOMAINS:
         plain = remove_redundant_subdomains(plain)
