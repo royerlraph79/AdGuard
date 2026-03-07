@@ -31,17 +31,20 @@ jobs:
         run: |
           echo "📍 STARTING convert_hosts.py"
           python convert_hosts.py \
-            -s sources.txt \
-            -o adguard_blocklist.txt \
-            --collapse-registrable \
             --wildcardize-keywords \
-            --keyword-threshold 2
+            --keyword-threshold 5 \
+            --collapse-registrable \
+            -v
           echo "✅ FINISHED convert_hosts.py"
 
       - name: 👀 Preview output
         run: |
-          echo "== Preview =="
-          head -n 10 adguard_blocklist.txt || true
+          echo "== Header preview =="
+          head -n 12 adguard_blocklist.txt || true
+
+          echo
+          echo "== First rules =="
+          grep -E '^\|\|.+\^$' adguard_blocklist.txt | head -n 10 || true
 
           RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
 
@@ -68,6 +71,5 @@ jobs:
           git config user.email "github-actions@github.com"
 
           git add -A
-
           git commit -m "🔄 Auto-update blocklist [skip ci]"
           git push
