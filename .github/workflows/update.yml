@@ -44,9 +44,9 @@ jobs:
 
           echo
           echo "== First rules =="
-          grep -E '^\|\|.+\^$' adguard_blocklist.txt | head -n 10 || true
+          grep -m 10 -E '^\|\|.+\^$' adguard_blocklist.txt || true
 
-          RULES=$(grep -E '^\|\|.+\^$' adguard_blocklist.txt | wc -l || true)
+          RULES=$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)
 
           echo "Rule count: $RULES"
           echo "### Rule count: $RULES" >> "$GITHUB_STEP_SUMMARY"
