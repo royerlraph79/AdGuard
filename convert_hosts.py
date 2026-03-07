@@ -6,9 +6,10 @@ import fnmatch
 import logging
 import os
 import re
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import urlsplit
@@ -38,7 +39,7 @@ VALID_DOMAIN_OR_WILDCARD_RE = re.compile(
     re.IGNORECASE,
 )
 
-USER_AGENT = "royerlraph79-AdGuardBlocklist/9.0"
+USER_AGENT = "royerlraph79-AdGuardBlocklist/10.1 (+https://github.com/royerlraph79/AdGuard)"
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 OUTPUT_TIMEZONE = ZoneInfo("America/Montreal")
 
@@ -69,6 +70,24 @@ class ParsedSuffixWildcard:
         return self.min_labels_before_base <= other_implied_before_our_base
 
 
+class DomainTrie:
+    def __init__(self) -> None:
+        self.root: dict[str, dict] = {}
+
+    def insert_broader_wins(self, domain: str) -> bool:
+        node = self.root
+        parts = domain.split(".")[::-1]
+
+        for part in parts:
+            if "__end__" in node:
+                return False
+            node = node.setdefault(part, {})
+
+        node.clear()
+        node["__end__"] = {}
+        return True
+
+
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -85,6 +104,7 @@ def make_stats() -> dict[str, int]:
         "parsed_entries": 0,
         "unique_entries": 0,
         "fetch_failures": 0,
+        "registrable_collapsed": 0,
         "subdomain_pruned": 0,
         "plain_removed_by_wildcards": 0,
         "wildcard_removed_by_plain": 0,
@@ -181,22 +201,23 @@ def normalize_token_to_entry(token: str) -> str:
     return d if VALID_HOST_RE.match(d) else ""
 
 
-class DomainTrie:
-    def __init__(self) -> None:
-        self.root: dict[str, dict] = {}
+def registrable_domain(host: str) -> str:
+    ext = _EXTRACT(host)
+    if not ext.domain or not ext.suffix:
+        return host
+    return f"{ext.domain}.{ext.suffix}"
 
-    def insert_broader_wins(self, domain: str) -> bool:
-        node = self.root
-        parts = domain.split(".")[::-1]
 
-        for part in parts:
-            if "__end__" in node:
-                return False
-            node = node.setdefault(part, {})
+def collapse_plain_to_registrable(domains: set[str], stats: dict[str, int]) -> set[str]:
+    collapsed_map: dict[str, set[str]] = defaultdict(set)
 
-        node.clear()
-        node["__end__"] = {}
-        return True
+    for d in domains:
+        collapsed_map[registrable_domain(d)].add(d)
+
+    collapsed = set(collapsed_map)
+    stats["registrable_collapsed"] += len(domains) - len(collapsed)
+    logging.info("Registrable collapse: %d -> %d", len(domains), len(collapsed))
+    return collapsed
 
 
 def dedupe_plain_subdomains(domains: Iterable[str], stats: dict[str, int]) -> set[str]:
@@ -283,6 +304,13 @@ def remove_plain_covered_by_wildcards(plain: set[str], wildcards: set[str], stat
 
 
 def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str], stats: dict[str, int]) -> set[str]:
+    """
+    Drop a wildcard rule when a plain domain already covers it.
+    ||example.com^ blocks all subdomains in AdGuard, so:
+      - *.example.com is redundant (direct base match)
+      - *.sub.example.com is redundant (ancestor example.com is in plain)
+    Complex globs are walked label-by-label the same way.
+    """
     if not plain or not wildcards:
         return wildcards
 
@@ -290,21 +318,41 @@ def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str], stat
 
     for w in wildcards:
         sw = parse_suffix_wildcard(w)
-        if sw is None:
-            out.add(w)
-            continue
 
-        if sw.base in plain and sw.min_labels_before_base >= 1:
+        if sw is not None:
+            # Walk up sw.base ancestors: sub.example.com -> example.com
+            base_parts = sw.base.split(".")
+            covered = any(
+                ".".join(base_parts[i:]) in plain
+                for i in range(len(base_parts) - 1)  # stops before bare TLD
+            )
+        else:
+            # Complex glob: walk labels directly
+            labels = w.lower().split(".")
+            covered = any(
+                ".".join(labels[i:]) in plain
+                for i in range(1, len(labels))
+            )
+
+        if covered:
             stats["wildcard_removed_by_plain"] += 1
-            continue
-
-        out.add(w)
+        else:
+            out.add(w)
 
     logging.info("Wildcards removed (covered by plain): %d", stats["wildcard_removed_by_plain"])
     return out
 
 
-def remove_redundant_wildcards(wildcards: set[str], stats: dict[str, int]) -> set[str]:
+def remove_redundant_wildcards(
+    wildcards: set[str],
+    stats: dict[str, int],
+    *,
+    conservative: bool = False,
+) -> set[str]:
+    """
+    Remove wildcard patterns covered by broader wildcard patterns.
+    With conservative=True, also prune complex globs covered by suffix wildcards.
+    """
     if not wildcards:
         return wildcards
 
@@ -315,7 +363,25 @@ def remove_redundant_wildcards(wildcards: set[str], stats: dict[str, int]) -> se
         if not any(prev.covers_wildcard(sw) for prev in kept_suffix):
             kept_suffix.append(sw)
 
-    kept = {sw.original for sw in kept_suffix} | set(complex_globs)
+    kept_complex = set(complex_globs)
+
+    if conservative:
+        super_wc_bases = {sw.base for sw in kept_suffix if sw.min_labels_before_base >= 1}
+        pruned_complex: set[str] = set()
+        for w in kept_complex:
+            wl = w.lower()
+            redundant = False
+            for base in super_wc_bases:
+                if wl == "*." + base:
+                    continue
+                if wl.endswith("." + base) and "." in wl[: -(len(base) + 1)]:
+                    redundant = True
+                    break
+            if not redundant:
+                pruned_complex.add(w)
+        kept_complex = pruned_complex
+
+    kept = {sw.original for sw in kept_suffix} | kept_complex
     stats["wildcard_removed_by_wildcards"] += len(wildcards) - len(kept)
 
     logging.info("Wildcard dedupe: %d -> %d", len(wildcards), len(kept))
@@ -325,8 +391,10 @@ def remove_redundant_wildcards(wildcards: set[str], stats: dict[str, int]) -> se
 def dedupe_entries(
     entries: set[str],
     *,
+    collapse_to_registrable: bool,
     dedupe_subdomains: bool,
     dedupe_plain_covered_by_wildcards: bool,
+    dedupe_wildcards_conservative: bool,
     stats: dict[str, int],
 ) -> set[str]:
     wildcards = {d for d in entries if "*" in d}
@@ -334,14 +402,27 @@ def dedupe_entries(
 
     logging.info("Plain: %d | Wildcards: %d", len(plain), len(wildcards))
 
+    # 1. Collapse subdomains to registrable domain (optional, off by default)
+    if collapse_to_registrable:
+        plain = collapse_plain_to_registrable(plain, stats)
+
+    # 2. Deduplicate plain subdomains via trie (broader wins)
     if dedupe_subdomains:
         plain = dedupe_plain_subdomains(plain, stats)
 
+    # 3. Drop plain domains already covered by a wildcard rule
     if dedupe_plain_covered_by_wildcards:
         plain = remove_plain_covered_by_wildcards(plain, wildcards, stats)
 
+    # 4. Drop wildcard rules made redundant by a plain domain
     wildcards = remove_wildcards_covered_by_plain(plain, wildcards, stats)
-    wildcards = remove_redundant_wildcards(wildcards, stats)
+
+    # 5. Drop wildcard rules covered by broader wildcard rules
+    wildcards = remove_redundant_wildcards(
+        wildcards,
+        stats,
+        conservative=dedupe_wildcards_conservative,
+    )
 
     result = plain | wildcards
     logging.info("Final total entries after dedupe: %d", len(result))
@@ -382,6 +463,9 @@ def _parse_source_text(text: str) -> tuple[set[str], dict[str, int]]:
 
 
 def _fetch_one(url: str) -> tuple[str, str]:
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"Invalid URL: {url}")
     with requests.Session() as session:
         r = session.get(url, timeout=(10, 60), headers={"User-Agent": USER_AGENT})
         r.raise_for_status()
@@ -394,7 +478,7 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
     total_unique_per_source = 0
 
     threads = max(1, threads)
-    logging.info("Fetching with threads=%d", threads)
+    logging.info("Fetching %d sources with threads=%d", len(urls), threads)
 
     with ThreadPoolExecutor(max_workers=threads) as ex:
         futs = {ex.submit(_fetch_one, url): url for url in urls}
@@ -404,7 +488,7 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
             try:
                 _, text = fut.result()
             except RequestException as e:
-                logging.error("Error fetching %s: %s", url, e)
+                logging.error("Fetch failed %s: %s", url, e)
                 global_stats["fetch_failures"] += 1
                 continue
             except Exception as e:
@@ -439,26 +523,36 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
 
 def write_output(output_path: Path, entries: set[str], stats: dict[str, int]) -> None:
     logging.info("Writing output to %s", output_path)
-    now = datetime.now(OUTPUT_TIMEZONE).strftime("%a %b %d %Y %I:%M:%S %p %Z")
+
+    # ISO 8601 UTC for machine readability + local time for humans
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_local = datetime.now(OUTPUT_TIMEZONE).strftime("%a %b %d %Y %I:%M:%S %p %Z")
 
     header = (
         "! Title: royerlraph79 AdGuard Blocklist\n"
         "! Expires: 24 hours\n"
-        f"! Generated: {now}\n"
+        f"! Generated: {now_utc} ({now_local})\n"
         f"! Entries: {len(entries)}\n"
         f"! Fetch failures: {stats['fetch_failures']}\n"
+        f"! Registrable collapsed: {stats['registrable_collapsed']}\n"
         f"! Subdomains pruned: {stats['subdomain_pruned']}\n"
         f"! Plain removed by wildcards: {stats['plain_removed_by_wildcards']}\n"
         f"! Wildcards removed by plain: {stats['wildcard_removed_by_plain']}\n"
         f"! Wildcards removed by wildcards: {stats['wildcard_removed_by_wildcards']}\n\n"
     )
 
-    lines = [f"||{e}^\n" for e in sorted(entries)]
+    sorted_entries = sorted(entries)
+    lines = []
+    for i, e in enumerate(sorted_entries, 1):
+        lines.append(f"||{e}^\n")
+        if i % 20_000 == 0:
+            logging.info("  ... wrote %d entries", i)
+
     output_path.write_text(header + "".join(lines), encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate a safe AdGuard blocklist.")
+    parser = argparse.ArgumentParser(description="Generate an optimized AdGuard blocklist.")
     parser.add_argument("-s", "--source", default="sources.txt", help="Path to sources file")
     parser.add_argument("-o", "--output", default="adguard_blocklist.txt", help="Output file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
@@ -469,6 +563,11 @@ def main() -> None:
         help="Number of fetch threads",
     )
     parser.add_argument(
+        "--collapse-registrable",
+        action="store_true",
+        help="Collapse subdomains to registrable domain (aggressive; may over-block)",
+    )
+    parser.add_argument(
         "--no-dedupe-subdomains",
         action="store_true",
         help="Disable plain subdomain deduplication",
@@ -476,7 +575,12 @@ def main() -> None:
     parser.add_argument(
         "--no-dedupe-plain-covered-by-wildcards",
         action="store_true",
-        help="Disable removing plain domains covered by explicit wildcard patterns",
+        help="Disable removing plain domains covered by wildcard patterns",
+    )
+    parser.add_argument(
+        "--dedupe-wildcards-conservative",
+        action="store_true",
+        help="Also prune complex glob wildcards covered by broader suffix wildcard rules",
     )
 
     args = parser.parse_args()
@@ -502,13 +606,14 @@ def main() -> None:
     logging.info("Starting blocklist generation | sources=%d", len(urls))
 
     raw_entries, stats = load_all_sources_concurrently(urls, threads=args.threads)
-    logging.info("Raw unique entries: %d", len(raw_entries))
-    logging.info("Global stats before dedupe: %s", stats)
+    logging.info("Raw unique entries: %d | fetch failures: %d", len(raw_entries), stats["fetch_failures"])
 
     final_entries = dedupe_entries(
         raw_entries,
+        collapse_to_registrable=args.collapse_registrable,
         dedupe_subdomains=not args.no_dedupe_subdomains,
         dedupe_plain_covered_by_wildcards=not args.no_dedupe_plain_covered_by_wildcards,
+        dedupe_wildcards_conservative=args.dedupe_wildcards_conservative,
         stats=stats,
     )
 
