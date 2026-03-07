@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""
-/convert_hosts.py
-
-Generate an optimized AdGuard blocklist from a list of source URLs.
-- Fast wildcard coverage using suffix checks (no regex).
-- Correct subdomain dedupe using a pruning reverse trie (broader wins).
-- Optional registrable-domain collapsing (OFF by default due to over-blocking risk).
-
-Usage:
-  python convert_hosts.py -s sources.txt -o adguard_blocklist.txt
-  python convert_hosts.py -s sources.txt -o out.txt --collapse-registrable
-"""
 
 from __future__ import annotations
 
@@ -48,7 +36,10 @@ VALID_DOMAIN_OR_WILDCARD_RE = re.compile(
     re.IGNORECASE,
 )
 
-USER_AGENT = "royerlraph79-AdGuardBlocklist/5.0"
+USER_AGENT = "royerlraph79-AdGuardBlocklist/5.1"
+
+# Use bundled PSL snapshot to avoid network call in CI
+_EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 
 
 def setup_logging(verbose: bool) -> None:
@@ -83,7 +74,7 @@ def is_regex_rule(line: str) -> bool:
 def strip_adblock_options(line: str) -> str:
     """
     Strip $options only for non-regex rules.
-    This is intentionally conservative to avoid breaking regex filters.
+    Intentionally conservative to avoid breaking regex filters.
     """
     ln = line.strip()
     if is_regex_rule(ln):
@@ -108,12 +99,10 @@ def extract_from_adblock_rule(line: str) -> str:
 
     ln = strip_adblock_options(ln)
 
-    # Common: ||host^
     m = re.match(r"^\|\|([^\^/]+)", ln)
     if m:
         return m.group(1)
 
-    # Anchored URL: |https://host/...
     if ln.startswith("|http://") or ln.startswith("|https://"):
         ln2 = ln.lstrip("|")
         host = urlsplit(ln2).hostname or ""
@@ -133,7 +122,6 @@ def choose_token(raw_line: str) -> tuple[str, str]:
     if hm:
         return ("hosts", hm.group(1))
 
-    # plain: first token
     return ("plain", ln.split()[0] if ln else "")
 
 
@@ -141,31 +129,26 @@ def normalize_token(token: str) -> str:
     """
     Normalize a domain-like token to:
       - plain host: example.com
-      - wildcard: *.example.com or ad*.example.com
+      - wildcard:   *.example.com or ad*.example.com
     Returns "" if invalid/ignored.
     """
     d = token.strip().lower()
     if not d:
         return ""
 
-    # ignore exception rules
     if d.startswith("@@"):
         return ""
 
-    # ignore obviously non-host tokens
     if d.startswith(("-", ".", "_")):
         return ""
 
-    # URLs -> host
     if d.startswith(("http://", "https://")):
         d = urlsplit(d).hostname or ""
 
-    # Trim common separators after host
     for sep in ("/", "?", "#"):
         if sep in d:
             d = d.split(sep, 1)[0]
 
-    # Remove port
     if ":" in d:
         d = d.split(":", 1)[0]
 
@@ -182,7 +165,7 @@ def normalize_token(token: str) -> str:
 
 
 def registrable_domain(host: str) -> str:
-    ext = tldextract.extract(host)
+    ext = _EXTRACT(host)
     if not ext.domain or not ext.suffix:
         return host
     return f"{ext.domain}.{ext.suffix}"
@@ -191,9 +174,8 @@ def registrable_domain(host: str) -> str:
 class DomainTrie:
     """
     Reverse-label trie where inserting a broader domain prunes narrower children.
-    Semantics:
-      - If any ancestor node has __end__, the domain is already covered => reject insert.
-      - When inserting, set __end__ and delete any children to keep state consistent.
+      - If any ancestor node has __end__, the domain is already covered => reject.
+      - When inserting, clear children and set __end__ so broader always wins.
     """
 
     def __init__(self) -> None:
@@ -208,7 +190,7 @@ class DomainTrie:
                 return False
             node = node.setdefault(part, {})
 
-        # mark as terminal and prune children (broader wins)
+        # Prune narrower children and mark as terminal
         node.clear()
         node["__end__"] = {}
         return True
@@ -217,11 +199,11 @@ class DomainTrie:
 def dedupe_plain_subdomains(domains: Iterable[str]) -> set[str]:
     """
     Remove redundant plain subdomains (broader wins).
-    e.g. keep example.com, drop a.example.com
+    e.g. keep example.com, drop sub.example.com.
     """
     trie = DomainTrie()
     out: set[str] = set()
-    # broader first => fewer labels first
+    # Insert broader (fewer labels) first
     for d in sorted(domains, key=lambda x: (x.count("."), x)):
         if trie.insert_broader_wins(d):
             out.add(d)
@@ -231,13 +213,11 @@ def dedupe_plain_subdomains(domains: Iterable[str]) -> set[str]:
 @dataclass(frozen=True)
 class SuffixWildcard:
     """
-    Represents patterns like:
-      *.example.com
-      *.*.example.com
-    Coverage check is suffix-based and enforces at least N labels before the base.
+    Represents pure leading-star patterns like *.example.com or *.*.example.com.
+    Coverage is suffix-based, requiring at least N labels before the base.
     """
     base: str
-    min_labels_before_base: int  # number of "*" labels in front (>=1)
+    min_labels_before_base: int  # number of leading "*" labels (>= 1)
 
     def covers_plain(self, host: str) -> bool:
         if host == self.base:
@@ -249,28 +229,29 @@ class SuffixWildcard:
         return len(labels) >= self.min_labels_before_base
 
     def covers_wildcard(self, other: "SuffixWildcard") -> bool:
-        # This wildcard covers the other if:
-        # - other's base ends with self.base (suffix)
-        # - and other requires >= labels before its base; ensure our required labels
-        #   are <= the labels implied by other's structure.
+        """
+        Returns True if self is broad enough to make other redundant.
+
+        Case 1: same base — self covers other if it requires <= labels before base.
+        Case 2: other's base is a subdomain of self's base — the extra labels in
+                other's base count toward the label requirement when viewed from
+                self's perspective, so we compare against the implied total.
+        """
         if other.base == self.base:
             return self.min_labels_before_base <= other.min_labels_before_base
         if not other.base.endswith("." + self.base):
             return False
         extra_prefix = other.base[: -(len(self.base) + 1)]
         extra_labels = [p for p in extra_prefix.split(".") if p]
-        # other host must have at least other.min labels before other.base.
-        # our requirement must be satisfiable within that structure.
-        # When shifting from other.base to our base, extra_labels become "before base".
-        # So required labels before our base is other.min + len(extra_labels).
+        # Labels before self.base = other.min_labels + len(extra_labels)
         other_implied_before_our_base = other.min_labels_before_base + len(extra_labels)
         return self.min_labels_before_base <= other_implied_before_our_base
 
 
 def parse_suffix_wildcard(pattern: str) -> Optional[SuffixWildcard]:
     """
-    Parse only pure leading-star label patterns: (*. or *.*. etc) + base with no other '*'.
-    Returns None if pattern is not in that form.
+    Parse pure leading-star label patterns: (*.)+ base, where base has no '*'.
+    Returns None for complex globs like ad*.example.com.
     """
     p = pattern.lower().strip()
     if "*" not in p:
@@ -303,9 +284,9 @@ def parse_suffix_wildcard(pattern: str) -> Optional[SuffixWildcard]:
 
 def split_wildcards(wildcards: set[str]) -> tuple[list[SuffixWildcard], list[str]]:
     """
-    Separate wildcard patterns into:
-      - fast suffix-wildcards: *.example.com, *.*.example.com
-      - complex globs: ad*.example.com, *ad.example.com, etc (fnmatch fallback)
+    Partition wildcards into:
+      - SuffixWildcard list: *.example.com, *.*.example.com  (fast suffix checks)
+      - complex globs list:  ad*.example.com, etc.           (fnmatch fallback)
     """
     suffix: list[SuffixWildcard] = []
     complex_globs: list[str] = []
@@ -315,34 +296,25 @@ def split_wildcards(wildcards: set[str]) -> tuple[list[SuffixWildcard], list[str
             suffix.append(sw)
         else:
             complex_globs.append(w.lower())
-    # sort suffix wildcards by (base labels asc, min_labels asc) => broader first
+    # Broader first: fewer base labels, then fewer required prefix labels
     suffix.sort(key=lambda x: (x.base.count("."), x.min_labels_before_base, x.base))
     complex_globs.sort()
     return suffix, complex_globs
 
 
 def remove_plain_covered_by_wildcards(plain: set[str], wildcards: set[str]) -> set[str]:
+    """Drop plain domains already matched by a wildcard rule."""
     if not wildcards or not plain:
         return plain
 
     suffix_wildcards, complex_globs = split_wildcards(wildcards)
-
     out: set[str] = set()
+
     for host in plain:
-        covered = False
-
-        for sw in suffix_wildcards:
-            if sw.covers_plain(host):
-                covered = True
-                break
-
+        covered = any(sw.covers_plain(host) for sw in suffix_wildcards)
         if not covered and complex_globs:
-            # fnmatch is slower than suffix checks; only used for non-suffix patterns.
-            for g in complex_globs:
-                if fnmatch.fnmatchcase(host, g):
-                    covered = True
-                    break
-
+            # fnmatch only for complex patterns not handled by SuffixWildcard
+            covered = any(fnmatch.fnmatchcase(host, g) for g in complex_globs)
         if not covered:
             out.add(host)
 
@@ -352,18 +324,18 @@ def remove_plain_covered_by_wildcards(plain: set[str], wildcards: set[str]) -> s
 
 def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str]) -> set[str]:
     """
-    Drop wildcard patterns whose base (or ancestors) are in plain.
-    e.g. if plain contains example.com then *.example.com is redundant.
+    Drop wildcard rules made redundant by a plain domain.
+    e.g. if example.com is in plain, *.example.com is redundant since
+    ||example.com^ already blocks all subdomains in AdGuard.
     """
     if not plain or not wildcards:
         return wildcards
 
     out: set[str] = set()
     for w in wildcards:
-        base = w[2:] if w.startswith("*.") else w
-        base = base.lower()
-
+        base = (w[2:] if w.startswith("*.") else w).lower()
         parts = base.split(".")
+        # Walk up: sub.example.com -> example.com -> check against plain
         redundant = any(".".join(parts[i:]) in plain for i in range(len(parts) - 1))
         if not redundant:
             out.add(w)
@@ -375,26 +347,21 @@ def remove_wildcards_covered_by_plain(plain: set[str], wildcards: set[str]) -> s
 def remove_redundant_wildcards(wildcards: set[str]) -> set[str]:
     """
     Remove wildcard patterns covered by broader wildcard patterns.
-    Optimizes suffix-wildcards using trie; keeps complex globs as-is.
+    SuffixWildcards are deduplicated via coverage checks; complex globs are kept as-is
+    since inter-glob coverage is rare and expensive to compute.
     """
     if not wildcards:
         return wildcards
 
     suffix_wildcards, complex_globs = split_wildcards(wildcards)
 
-    # Deduplicate suffix wildcards by coverage.
     kept_suffix: list[SuffixWildcard] = []
     for sw in suffix_wildcards:
-        if any(prev.covers_wildcard(sw) for prev in kept_suffix):
-            continue
-        kept_suffix.append(sw)
+        if not any(prev.covers_wildcard(sw) for prev in kept_suffix):
+            kept_suffix.append(sw)
 
-    kept: set[str] = {("*." * (sw.min_labels_before_base - 1) + "*." + sw.base).replace("*.*.", "*.*.") for sw in kept_suffix}
-    # The above reconstruction is safe for min_labels>=1, produces:
-    # 1 -> "*.base", 2 -> "*.*.base", etc.
-    # NOTE: the replace is harmless; kept format is consistent.
-
-    # Keep complex globs; optionally dedupe exact duplicates
+    # Reconstruct string form: min_labels=1 -> "*.base", min_labels=2 -> "*.*.base", etc.
+    kept: set[str] = {"*." * sw.min_labels_before_base + sw.base for sw in kept_suffix}
     kept |= set(complex_globs)
 
     logging.info("Wildcard dedupe: %d -> %d", len(wildcards), len(kept))
@@ -414,26 +381,34 @@ def dedupe_domains(
     dedupe_plain_covered_by_wildcards: bool,
     collapse_to_registrable: bool,
 ) -> set[str]:
+    logging.info("Starting deduplication pipeline...")
+
     wildcards = {d for d in domains if "*" in d}
     plain = {d for d in domains if "*" not in d}
 
     logging.info("Plain: %d | Wildcards: %d", len(plain), len(wildcards))
 
+    # 1. Collapse plain subdomains to registrable domain (optional, off by default)
     if collapse_to_registrable:
         plain = collapse_plain_to_registrable(plain)
 
+    # 2. Deduplicate plain subdomains via trie (broader wins)
     if dedupe_subdomains:
         logging.info("Deduping plain subdomains (broader wins)...")
         plain = dedupe_plain_subdomains(plain)
 
+    # 3. Drop plain domains covered by a wildcard rule
     if dedupe_plain_covered_by_wildcards:
         plain = remove_plain_covered_by_wildcards(plain, wildcards)
 
+    # 4. Drop wildcards made redundant by a plain rule
     wildcards = remove_wildcards_covered_by_plain(plain, wildcards)
+
+    # 5. Drop wildcards covered by broader wildcards
     wildcards = remove_redundant_wildcards(wildcards)
 
     result = plain | wildcards
-    logging.info("Final total domains/patterns: %d", len(result))
+    logging.info("Final total: %d", len(result))
     return result
 
 
@@ -518,7 +493,6 @@ def write_output(output_path: Path, domains: set[str]) -> None:
         f"! Generated: {now}\n"
         f"! Domains: {len(domains)}\n\n"
     )
-
     lines = [f"||{domain}^\n" for domain in sorted(domains)]
     output_path.write_text(header + "".join(lines), encoding="utf-8")
 
@@ -528,7 +502,6 @@ def main() -> None:
     parser.add_argument("-s", "--source", default="sources.txt", help="Path to sources file")
     parser.add_argument("-o", "--output", default="adguard_blocklist.txt", help="Output file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
-
     parser.add_argument(
         "--collapse-registrable",
         action="store_true",
