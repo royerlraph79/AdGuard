@@ -16,8 +16,10 @@ jobs:
     steps:
       - name: ⬇️ Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: 🐍 Set up Python 3.14.3
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.14.3"
@@ -27,91 +29,74 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 🔎 Show repo state
+      - name: 🔎 Validate inputs
         run: |
-          echo "== Branch =="
-          git branch --show-current || true
+          test -f convert_hosts.py
+          test -f sources.txt
 
-          echo
-          echo "== Files =="
-          ls -la || true
-          ls -la .github/workflows || true
+          echo "== Sources file =="
+          sed -n '1,40p' sources.txt
 
-          echo
-          echo "== convert_hosts.py first 40 lines =="
-          sed -n '1,40p' convert_hosts.py || true
+          SOURCE_COUNT=$(grep -cve '^\s*$' -e '^\s*[#!;]' sources.txt || true)
+          echo "Source count: $SOURCE_COUNT"
 
-      - name: ⚙️ Generate blocklist
-        run: |
-          set -euxo pipefail
-
-          rm -f adguard_blocklist.txt
-
-          echo "📍 STARTING convert_hosts.py"
-          python convert_hosts.py \
-            --wildcardize-keywords \
-            --keyword-threshold 5 \
-            --collapse-registrable \
-            -v
-          echo "✅ FINISHED convert_hosts.py"
-
-          echo
-          echo "== Output file info =="
-          ls -lh adguard_blocklist.txt
-          wc -c adguard_blocklist.txt
-          wc -l adguard_blocklist.txt
-
-      - name: 🧪 Validate generated file
-        run: |
-          set -euxo pipefail
-
-          test -f adguard_blocklist.txt
-          test -s adguard_blocklist.txt
-
-          RULES=$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)
-
-          echo "Detected rule count: $RULES"
-
-          if [ "$RULES" -eq 0 ]; then
-            echo "❌ Generated file contains zero rules"
-            echo "== Full file dump =="
-            cat adguard_blocklist.txt || true
+          if [ "$SOURCE_COUNT" -eq 0 ]; then
+            echo "No usable sources found in sources.txt"
             exit 1
           fi
 
+      - name: ⚙️ Generate blocklist
+        run: |
+          echo "📍 STARTING convert_hosts.py"
+          python convert_hosts.py \
+            --source sources.txt \
+            --output adguard_blocklist.txt \
+            --wildcardize-keywords \
+            --keyword-threshold 5 \
+            --collapse-registrable \
+            --threads 16 \
+            -v
+          echo "✅ FINISHED convert_hosts.py"
+
       - name: 👀 Preview output
         run: |
+          test -f adguard_blocklist.txt
+
           echo "== Header preview =="
           sed -n '1,/^$/p' adguard_blocklist.txt || true
 
           echo
           echo "== First rules =="
-          grep -m 10 -E '^\|\|.+\^$' adguard_blocklist.txt || true
+          grep -m 20 -E '^\|\|.+\^$' adguard_blocklist.txt || true
 
           RULES=$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)
-
           echo "Rule count: $RULES"
           echo "### Rule count: $RULES" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RULES" -eq 0 ]; then
+            echo "Generator produced zero rules"
+            exit 1
+          fi
 
       - name: ✅ Check for changes
         id: git-check
         run: |
-          if git diff --quiet; then
+          if git diff --quiet -- adguard_blocklist.txt; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changes detected."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Changes detected."
             git status --porcelain
-            git diff --stat || true
+            git diff --stat -- adguard_blocklist.txt || true
           fi
 
       - name: 📤 Commit and push changes
         if: steps.git-check.outputs.changed == 'true'
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add adguard_blocklist.txt convert_hosts.py .github/workflows/update.yml requirements.txt
+          git add adguard_blocklist.txt
           git commit -m "🔄 Auto-update blocklist [skip ci]"
           git push
