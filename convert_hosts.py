@@ -42,7 +42,6 @@ USER_AGENT = "royerlraph79-AdGuardBlocklist/4.0"
 
 DEDUP_SUBDOMAINS = True
 DEDUP_PLAIN_COVERED_BY_WILDCARDS = True
-DEDUP_WILDCARDS_CONSERVATIVE = False
 COLLAPSE_TO_REGISTRABLE = True
 
 # ============================================================
@@ -182,17 +181,18 @@ def remove_redundant_subdomains(domains: Iterable[str]) -> set[str]:
 # Wildcard-aware dedupe
 # ============================================================
 
-def glob_to_regex(glob: str) -> re.Pattern[str]:
-    esc = re.escape(glob.lower())
-    esc = esc.replace(r"\*", r"[a-z0-9.-]*")
-    return re.compile(rf"^{esc}$", re.IGNORECASE)
-
 def remove_plain_covered_by_wildcards(
     plain: set[str],
     wildcards: set[str],
 ) -> set[str]:
+    """Drop plain domains already matched by a wildcard rule."""
     if not wildcards:
         return plain
+
+    def glob_to_regex(glob: str) -> re.Pattern[str]:
+        esc = re.escape(glob.lower())
+        esc = esc.replace(r"\*", r"[a-z0-9.-]*")
+        return re.compile(rf"^{esc}$", re.IGNORECASE)
 
     wildcard_res = [glob_to_regex(w) for w in sorted(wildcards)]
     out: set[str] = set()
@@ -201,35 +201,55 @@ def remove_plain_covered_by_wildcards(
         if not any(rx.match(d) for rx in wildcard_res):
             out.add(d)
 
+    removed = len(plain) - len(out)
+    logging.info("Plain domains removed (covered by wildcards): %d", removed)
     return out
 
-def conservative_wildcard_prune(wildcards: set[str]) -> set[str]:
+def remove_wildcards_covered_by_plain(
+    plain: set[str],
+    wildcards: set[str],
+) -> set[str]:
+    """Drop *.example.com when ||example.com^ already covers all subdomains."""
+    if not plain:
+        return wildcards
+
+    out: set[str] = set()
+    for w in wildcards:
+        base = w[2:] if w.startswith("*.") else w
+        parts = base.split(".")
+        # Walk up the hierarchy: sub.example.com → example.com
+        covered = any(
+            ".".join(parts[i:]) in plain
+            for i in range(len(parts) - 1)
+        )
+        if not covered:
+            out.add(w)
+
+    removed = len(wildcards) - len(out)
+    logging.info("Wildcards removed (covered by plain): %d", removed)
+    return out
+
+def remove_redundant_wildcards(wildcards: set[str]) -> set[str]:
+    """Drop *.sub.example.com when *.example.com already covers it."""
     if not wildcards:
         return wildcards
 
-    super_wc_bases = set()
-    for w in wildcards:
-        wl = w.lower()
-        if wl.startswith("*.") and "." in wl[2:]:
-            super_wc_bases.add(wl[2:])
+    logging.info("Deduplicating wildcard rules via trie...")
+    trie = DomainTrie()
+    result: set[str] = set()
 
-    if not super_wc_bases:
-        return wildcards
+    # Strip leading "*." so trie logic works the same as for plain domains
+    normalized = [
+        (w, w[2:]) if w.startswith("*.") else (w, w)
+        for w in wildcards
+    ]
 
-    pruned: set[str] = set()
-    for w in wildcards:
-        wl = w.lower()
-        redundant = False
-        for base in super_wc_bases:
-            if wl == "*." + base:
-                continue
-            if wl.endswith("." + base) and "." in wl[: -(len(base) + 1)]:
-                redundant = True
-                break
-        if not redundant:
-            pruned.add(w)
+    for orig, base in sorted(normalized, key=lambda x: (x[1].count("."), x[1])):
+        if trie.insert(base):
+            result.add(orig)
 
-    return pruned
+    logging.info("Wildcard dedupe: %d -> %d", len(wildcards), len(result))
+    return result
 
 # ============================================================
 # Registrable-domain collapse
@@ -253,26 +273,35 @@ def collapse_plain_to_registrable(domains: set[str]) -> set[str]:
     )
     return collapsed
 
+# ============================================================
+# Deduplication Pipeline
+# ============================================================
+
 def dedupe_domains(domains: set[str]) -> set[str]:
     logging.info("Starting final deduplication pipeline...")
 
     wildcards = {d for d in domains if "*" in d}
     plain = {d for d in domains if "*" not in d}
 
-    logging.info("Plain domains before dedupe: %d", len(plain))
-    logging.info("Wildcard patterns before dedupe: %d", len(wildcards))
+    logging.info("Plain: %d | Wildcards: %d", len(plain), len(wildcards))
 
+    # 1. Collapse plain subdomains to registrable domain (sub.example.com → example.com)
     if COLLAPSE_TO_REGISTRABLE:
         plain = collapse_plain_to_registrable(plain)
 
+    # 2. Deduplicate plain subdomains via trie (broader/shorter wins)
     if DEDUP_SUBDOMAINS:
         plain = remove_redundant_subdomains(plain)
 
+    # 3. Drop plain domains already covered by a wildcard rule
     if DEDUP_PLAIN_COVERED_BY_WILDCARDS:
         plain = remove_plain_covered_by_wildcards(plain, wildcards)
 
-    if DEDUP_WILDCARDS_CONSERVATIVE:
-        wildcards = conservative_wildcard_prune(wildcards)
+    # 4. Drop wildcards made redundant by a plain rule (||example.com^ covers *.example.com)
+    wildcards = remove_wildcards_covered_by_plain(plain, wildcards)
+
+    # 5. Drop wildcards covered by broader wildcards (*.example.com covers *.sub.example.com)
+    wildcards = remove_redundant_wildcards(wildcards)
 
     result = plain | wildcards
     logging.info("Final deduplication complete. Total: %d", len(result))
