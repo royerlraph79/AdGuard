@@ -8,37 +8,41 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: update-blocklist-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: ⬇️ Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v5
 
       - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14.3"
+          python-version: "3.14"
+          cache: "pip"
 
       - name: 📦 Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 🔎 Validate inputs
+      - name: 🔎 Validate repository inputs
+        shell: bash
         run: |
+          set -euo pipefail
+
           test -f convert_hosts.py
           test -f sources.txt
 
-          echo "== Sources file =="
-          sed -n '1,40p' sources.txt
-
-          SOURCE_COUNT=$(grep -cve '^\s*$' -e '^\s*[#!;]' sources.txt || true)
+          SOURCE_COUNT="$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*[#!;]' sources.txt || true)"
           echo "Source count: $SOURCE_COUNT"
+          echo "### Source count: $SOURCE_COUNT" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$SOURCE_COUNT" -eq 0 ]; then
             echo "No usable sources found in sources.txt"
@@ -46,9 +50,11 @@ jobs:
           fi
 
       - name: ⚙️ Generate blocklist
+        shell: bash
         run: |
-          echo "📍 STARTING convert_hosts.py"
-          python convert_hosts.py \
+          set -euo pipefail
+
+          python -u convert_hosts.py \
             --source sources.txt \
             --output adguard_blocklist.txt \
             --wildcardize-keywords \
@@ -56,31 +62,53 @@ jobs:
             --collapse-registrable \
             --threads 16 \
             -v
-          echo "✅ FINISHED convert_hosts.py"
 
-      - name: 👀 Preview output
+      - name: 👀 Validate generated output
+        shell: bash
         run: |
+          set -euo pipefail
+
           test -f adguard_blocklist.txt
 
-          echo "== Header preview =="
-          sed -n '1,/^$/p' adguard_blocklist.txt || true
+          FILE_SIZE="$(wc -c < adguard_blocklist.txt)"
+          RULES="$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)"
 
-          echo
-          echo "== First rules =="
-          grep -m 20 -E '^\|\|.+\^$' adguard_blocklist.txt || true
-
-          RULES=$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)
+          echo "Generated file size: $FILE_SIZE bytes"
           echo "Rule count: $RULES"
-          echo "### Rule count: $RULES" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "### Output summary"
+            echo
+            echo "- File size: $FILE_SIZE bytes"
+            echo "- Rule count: $RULES"
+            echo
+            echo "### Header preview"
+            echo '```'
+            sed -n '1,/^$/p' adguard_blocklist.txt || true
+            echo '```'
+            echo
+            echo "### First rules"
+            echo '```'
+            grep -m 20 -E '^\|\|.+\^$' adguard_blocklist.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FILE_SIZE" -eq 0 ]; then
+            echo "Generated file is empty"
+            exit 1
+          fi
 
           if [ "$RULES" -eq 0 ]; then
-            echo "Generator produced zero rules"
+            echo "Generated file contains zero rules"
             exit 1
           fi
 
       - name: ✅ Check for changes
         id: git-check
+        shell: bash
         run: |
+          set -euo pipefail
+
           if git diff --quiet -- adguard_blocklist.txt; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changes detected."
@@ -93,7 +121,10 @@ jobs:
 
       - name: 📤 Commit and push changes
         if: steps.git-check.outputs.changed == 'true'
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
