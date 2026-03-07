@@ -40,7 +40,7 @@ jobs:
       - name: 👀 Preview output
         run: |
           echo "== Header preview =="
-          head -n 12 adguard_blocklist.txt || true
+          sed -n '1,/^$/p' adguard_blocklist.txt || true
 
           echo
           echo "== First rules =="
