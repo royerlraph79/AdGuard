@@ -3,69 +3,166 @@ name: Update Blocklist
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 4 * * *"
+    - cron: "0 5 * * *"
 
 permissions:
   contents: write
 
+concurrency:
+  group: update-blocklist-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: ⬇️ Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: 🐍 Set up Python 3.14.3
+      - name: 🕛 Gate schedule to Montreal midnight
+        id: montreal-time
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LOCAL_HOUR="$(TZ=America/Montreal date +%H)"
+          LOCAL_STAMP="$(TZ=America/Montreal date '+%Y-%m-%d %H:%M:%S %Z')"
+          UTC_STAMP="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          echo "UTC time: $UTC_STAMP"
+          echo "Montreal time: $LOCAL_STAMP"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_now=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch detected; bypassing midnight gate."
+            exit 0
+          fi
+
+          if [ "$LOCAL_HOUR" = "00" ]; then
+            echo "run_now=true" >> "$GITHUB_OUTPUT"
+            echo "Scheduled run matches Montreal midnight."
+          else
+            echo "run_now=false" >> "$GITHUB_OUTPUT"
+            echo "Scheduled run is not Montreal midnight; skipping."
+          fi
+
+      - name: 🐍 Set up Python
+        if: steps.montreal-time.outputs.run_now == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.14.3"
+          cache: "pip"
 
       - name: 📦 Install dependencies
+        if: steps.montreal-time.outputs.run_now == 'true'
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 🔎 Validate inputs
+        if: steps.montreal-time.outputs.run_now == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f convert_hosts.py
+          test -f sources.txt
+
+          SOURCE_COUNT="$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*[#!;]' sources.txt || true)"
+          echo "Source count: $SOURCE_COUNT"
+          echo "### Source count: $SOURCE_COUNT" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$SOURCE_COUNT" -eq 0 ]; then
+            echo "No usable sources found in sources.txt"
+            exit 1
+          fi
+
       - name: ⚙️ Generate blocklist
+        if: steps.montreal-time.outputs.run_now == 'true'
+        shell: bash
         run: |
-          echo "📍 STARTING convert_hosts.py"
-          python convert_hosts.py -v
-          echo "✅ FINISHED convert_hosts.py"
+          set -euo pipefail
 
-      - name: 👀 Preview output
+          python -u convert_hosts.py \
+            --source sources.txt \
+            --output adguard_blocklist.txt \
+            --threads 16 \
+            --collapse-registrable \
+            --dedupe-wildcards-conservative \
+            -v
+
+      - name: 👀 Validate generated output
+        if: steps.montreal-time.outputs.run_now == 'true'
+        shell: bash
         run: |
-          echo "== Header preview =="
-          sed -n '1,/^$/p' adguard_blocklist.txt || true
+          set -euo pipefail
 
-          echo
-          echo "== First rules =="
-          grep -m 10 -E '^\|\|.+\^$' adguard_blocklist.txt || true
+          test -f adguard_blocklist.txt
 
-          RULES=$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)
+          FILE_SIZE="$(wc -c < adguard_blocklist.txt)"
+          RULES="$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)"
 
+          echo "Generated file size: $FILE_SIZE bytes"
           echo "Rule count: $RULES"
-          echo "### Rule count: $RULES" >> "$GITHUB_STEP_SUMMARY"
+
+          {
+            echo "### Output summary"
+            echo
+            echo "- File size: $FILE_SIZE bytes"
+            echo "- Rule count: $RULES"
+            echo
+            echo "### Header preview"
+            echo '```'
+            sed -n '1,/^$/p' adguard_blocklist.txt || true
+            echo '```'
+            echo
+            echo "### First rules"
+            echo '```'
+            grep -m 20 -E '^\|\|.+\^$' adguard_blocklist.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FILE_SIZE" -eq 0 ]; then
+            echo "Generated file is empty"
+            exit 1
+          fi
+
+          if [ "$RULES" -eq 0 ]; then
+            echo "Generated file contains zero rules"
+            exit 1
+          fi
 
       - name: ✅ Check for changes
+        if: steps.montreal-time.outputs.run_now == 'true'
         id: git-check
+        shell: bash
         run: |
-          if git diff --quiet; then
+          set -euo pipefail
+
+          if git diff --quiet -- adguard_blocklist.txt; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changes detected."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Changes detected."
             git status --porcelain
-            git diff --stat || true
+            git diff --stat -- adguard_blocklist.txt || true
           fi
 
       - name: 📤 Commit and push changes
-        if: steps.git-check.outputs.changed == 'true'
+        if: steps.montreal-time.outputs.run_now == 'true' && steps.git-check.outputs.changed == 'true'
+        shell: bash
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          set -euo pipefail
 
-          git add adguard_blocklist.txt convert_hosts.py .github/workflows/update.yml requirements.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add adguard_blocklist.txt
           git commit -m "🔄 Auto-update blocklist [skip ci]"
           git push
