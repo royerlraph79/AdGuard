@@ -53,7 +53,7 @@ jobs:
         if: steps.montreal-time.outputs.run_now == 'true'
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14.3"
+          python-version: "3.14.4"
           cache: "pip"
 
       - name: 📦 Install dependencies
@@ -73,7 +73,7 @@ jobs:
           test -f convert_hosts.py
           test -f sources.txt
 
-          SOURCE_COUNT="$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*[#!;]' sources.txt || true)"
+          SOURCE_COUNT="$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*\(#\|!\|;\|//\)' sources.txt || true)"
           echo "Source count: $SOURCE_COUNT"
           echo "### Source count: $SOURCE_COUNT" >> "$GITHUB_STEP_SUMMARY"
 
@@ -81,6 +81,20 @@ jobs:
             echo "No usable sources found in sources.txt"
             exit 1
           fi
+
+      - name: 🧪 Dry-run parser
+        if: steps.montreal-time.outputs.run_now == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -u convert_hosts.py \
+            --source sources.txt \
+            --output adguard_blocklist.txt \
+            --threads 16 \
+            --dedupe-wildcards-conservative \
+            --check \
+            -v
 
       - name: ⚙️ Generate blocklist
         if: steps.montreal-time.outputs.run_now == 'true'
@@ -133,6 +147,13 @@ jobs:
 
           if [ "$RULES" -eq 0 ]; then
             echo "Generated file contains zero rules"
+            exit 1
+          fi
+
+          MIN_RULES=1000
+
+          if [ "$RULES" -lt "$MIN_RULES" ]; then
+            echo "Generated rule count is suspiciously low: $RULES < $MIN_RULES"
             exit 1
           fi
 
