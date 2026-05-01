@@ -2,7 +2,7 @@ https://raw.githubusercontent.com/anudeepND/blacklist/master/adservers.txt
 https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt
 https://badmojr.github.io/1Hosts/Lite/adblock.txt
 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.mini.txt
-https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext
+https://pgl.yoyo.org/as/serverlist.php?hostformat=adblockplus
 https://blocklistproject.github.io/Lists/adguard/tracking-ags.txt
 https://blocklistproject.github.io/Lists/basic.txt
 
