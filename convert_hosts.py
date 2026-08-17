@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 import requests
 import tldextract
-from requests import RequestException
 
 COMMENT_PREFIXES = ("#", "!", "//", ";")
 
@@ -37,6 +36,15 @@ USER_AGENT = "royerlraph79-AdGuardBlocklist/10.1 (+https://github.com/royerlraph
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 OUTPUT_TIMEZONE = ZoneInfo("America/Montreal")
 
+HEADER_STATS = (
+    ("Fetch failures", "fetch_failures"),
+    ("Registrable collapsed", "registrable_collapsed"),
+    ("Subdomains pruned", "subdomain_pruned"),
+    ("Plain removed by wildcards", "plain_removed_by_wildcards"),
+    ("Wildcards removed by plain", "wildcard_removed_by_plain"),
+    ("Wildcards removed by wildcards", "wildcard_removed_by_wildcards"),
+)
+
 
 @dataclass(frozen=True)
 class ParsedSuffixWildcard:
@@ -47,24 +55,21 @@ class ParsedSuffixWildcard:
     def covers_plain(self, host: str) -> bool:
         if host == self.base:
             return False
-        if not host.endswith("." + self.base):
-            return False
-        prefix = host[: -(len(self.base) + 1)]
-        labels = [p for p in prefix.split(".") if p]
-        return len(labels) >= self.min_labels_before_base
+
+        extra_labels = labels_before_suffix(host, self.base)
+
+        return extra_labels is not None and extra_labels >= self.min_labels_before_base
 
     def covers_wildcard(self, other: ParsedSuffixWildcard) -> bool:
         if other.base == self.base:
             return self.min_labels_before_base <= other.min_labels_before_base
 
-        if not other.base.endswith("." + self.base):
+        extra_labels = labels_before_suffix(other.base, self.base)
+
+        if extra_labels is None:
             return False
 
-        extra_prefix = other.base[: -(len(self.base) + 1)]
-        extra_labels = [p for p in extra_prefix.split(".") if p]
-        other_implied_before_our_base = other.min_labels_before_base + len(extra_labels)
-
-        return self.min_labels_before_base <= other_implied_before_our_base
+        return self.min_labels_before_base <= other.min_labels_before_base + extra_labels
 
 
 class DomainTrie:
@@ -83,6 +88,43 @@ class DomainTrie:
         node.clear()
         node["__end__"] = {}
         return True
+
+
+def labels_before_suffix(host: str, suffix: str) -> int | None:
+    """Count labels of `host` preceding `suffix`, or None when host is not under it."""
+    if not host.endswith("." + suffix):
+        return None
+
+    prefix = host[: -(len(suffix) + 1)]
+
+    return len([p for p in prefix.split(".") if p])
+
+
+def domain_suffixes(host: str, *, include_self: bool, include_tld: bool) -> Iterator[str]:
+    """Yield the label suffixes of `host`, from the longest to the shortest."""
+    labels = host.split(".")
+
+    start = 0 if include_self else 1
+    stop = len(labels) if include_tld else len(labels) - 1
+
+    for i in range(start, stop):
+        yield ".".join(labels[i:])
+
+
+def partition_wildcards(entries: Iterable[str]) -> tuple[set[str], set[str]]:
+    plain: set[str] = set()
+    wildcards: set[str] = set()
+
+    for entry in entries:
+        target = wildcards if "*" in entry else plain
+        target.add(entry)
+
+    return plain, wildcards
+
+
+def record_reduction(stats: dict[str, int], key: str, label: str, before: int, after: int) -> None:
+    stats[key] += before - after
+    logging.info("%s: %d -> %d", label, before, after)
 
 
 def setup_logging(verbose: bool) -> None:
@@ -264,9 +306,8 @@ def collapse_plain_to_registrable(domains: set[str], stats: dict[str, int]) -> s
         collapsed_map[registrable_domain(d)].add(d)
 
     collapsed = set(collapsed_map)
-    stats["registrable_collapsed"] += len(domains) - len(collapsed)
+    record_reduction(stats, "registrable_collapsed", "Registrable collapse", len(domains), len(collapsed))
 
-    logging.info("Registrable collapse: %d -> %d", len(domains), len(collapsed))
     return collapsed
 
 
@@ -279,9 +320,8 @@ def dedupe_plain_subdomains(domains: Iterable[str], stats: dict[str, int]) -> se
         if trie.insert_broader_wins(d):
             out.add(d)
 
-    stats["subdomain_pruned"] += len(ordered) - len(out)
+    record_reduction(stats, "subdomain_pruned", "Plain subdomain dedupe", len(ordered), len(out))
 
-    logging.info("Plain subdomain dedupe: %d -> %d", len(ordered), len(out))
     return out
 
 
@@ -323,10 +363,14 @@ def remove_plain_covered_by_wildcards(
         if not covered:
             out.add(host)
 
-    removed = len(plain) - len(out)
-    stats["plain_removed_by_wildcards"] += removed
+    record_reduction(
+        stats,
+        "plain_removed_by_wildcards",
+        "Plain domains covered by wildcards",
+        len(plain),
+        len(out),
+    )
 
-    logging.info("Plain domains removed, covered by wildcards: %d", removed)
     return out
 
 
@@ -344,24 +388,23 @@ def remove_wildcards_covered_by_plain(
         sw = parse_suffix_wildcard(w)
 
         if sw is not None:
-            base_parts = sw.base.split(".")
-            covered = any(
-                ".".join(base_parts[i:]) in plain
-                for i in range(len(base_parts) - 1)
-            )
+            suffixes = domain_suffixes(sw.base, include_self=True, include_tld=False)
         else:
-            labels = w.lower().split(".")
-            covered = any(
-                ".".join(labels[i:]) in plain
-                for i in range(1, len(labels))
-            )
+            suffixes = domain_suffixes(w.lower(), include_self=False, include_tld=True)
 
-        if covered:
-            stats["wildcard_removed_by_plain"] += 1
-        else:
-            out.add(w)
+        if any(suffix in plain for suffix in suffixes):
+            continue
 
-    logging.info("Wildcards removed, covered by plain: %d", stats["wildcard_removed_by_plain"])
+        out.add(w)
+
+    record_reduction(
+        stats,
+        "wildcard_removed_by_plain",
+        "Wildcards covered by plain domains",
+        len(wildcards),
+        len(out),
+    )
+
     return out
 
 
@@ -396,9 +439,9 @@ def remove_redundant_wildcards(
                 if wl == "*." + base:
                     continue
 
-                prefix = wl[: -(len(base) + 1)] if wl.endswith("." + base) else ""
+                extra_labels = labels_before_suffix(wl, base)
 
-                if wl.endswith("." + base) and "." in prefix:
+                if extra_labels is not None and extra_labels >= 2:
                     redundant = True
                     break
 
@@ -408,10 +451,14 @@ def remove_redundant_wildcards(
         kept_complex = pruned_complex
 
     kept = {sw.original for sw in kept_suffix} | kept_complex
-    removed = len(wildcards) - len(kept)
-    stats["wildcard_removed_by_wildcards"] += removed
+    record_reduction(
+        stats,
+        "wildcard_removed_by_wildcards",
+        "Wildcard dedupe",
+        len(wildcards),
+        len(kept),
+    )
 
-    logging.info("Wildcard dedupe: %d -> %d", len(wildcards), len(kept))
     return kept
 
 
@@ -424,8 +471,7 @@ def dedupe_entries(
     dedupe_wildcards_conservative: bool,
     stats: dict[str, int],
 ) -> set[str]:
-    wildcards = {d for d in entries if "*" in d}
-    plain = {d for d in entries if "*" not in d}
+    plain, wildcards = partition_wildcards(entries)
 
     logging.info("Plain: %d | Wildcards: %d", len(plain), len(wildcards))
 
@@ -515,12 +561,8 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
 
             try:
                 _, text = fut.result()
-            except RequestException as e:
-                logging.error("Fetch failed %s: %s", url, e)
-                global_stats["fetch_failures"] += 1
-                continue
             except Exception as e:
-                logging.error("Unexpected error fetching %s: %s", url, e)
+                logging.error("Fetch failed %s: %s", url, e)
                 global_stats["fetch_failures"] += 1
                 continue
 
@@ -558,18 +600,15 @@ def write_output(output_path: Path, entries: set[str], stats: dict[str, int]) ->
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     now_local = datetime.now(OUTPUT_TIMEZONE).strftime("%a %b %d %Y %I:%M:%S %p %Z")
 
-    header = (
-        "! Title: royerlraph79 AdGuard Blocklist\n"
-        "! Expires: 24 hours\n"
-        f"! Generated: {now_utc} ({now_local})\n"
-        f"! Entries: {len(entries)}\n"
-        f"! Fetch failures: {stats['fetch_failures']}\n"
-        f"! Registrable collapsed: {stats['registrable_collapsed']}\n"
-        f"! Subdomains pruned: {stats['subdomain_pruned']}\n"
-        f"! Plain removed by wildcards: {stats['plain_removed_by_wildcards']}\n"
-        f"! Wildcards removed by plain: {stats['wildcard_removed_by_plain']}\n"
-        f"! Wildcards removed by wildcards: {stats['wildcard_removed_by_wildcards']}\n\n"
-    )
+    header_lines = [
+        "! Title: royerlraph79 AdGuard Blocklist",
+        "! Expires: 24 hours",
+        f"! Generated: {now_utc} ({now_local})",
+        f"! Entries: {len(entries)}",
+        *(f"! {label}: {stats[key]}" for label, key in HEADER_STATS),
+    ]
+
+    header = "\n".join(header_lines) + "\n\n"
 
     lines = []
 
