@@ -34,6 +34,9 @@ VALID_HOST_RE = re.compile(
 )
 
 USER_AGENT = "royerlraph79-AdGuardBlocklist/10.1 (+https://github.com/royerlraph79/AdGuard)"
+MAX_TOKEN_LENGTH = 253
+MAX_SOURCE_BYTES = 128 * 1024 * 1024
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 OUTPUT_TIMEZONE = ZoneInfo("America/Montreal")
 
@@ -205,6 +208,9 @@ def normalize_token_to_entry(token: str) -> str:
     d = token.strip().lower()
 
     if not d:
+        return ""
+
+    if len(d) > MAX_TOKEN_LENGTH:
         return ""
 
     if d.startswith("@@"):
@@ -489,13 +495,34 @@ def _parse_source_text(text: str) -> tuple[set[str], dict[str, int]]:
 def _fetch_one(url: str) -> tuple[str, str]:
     parsed = urlsplit(url)
 
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(f"Invalid URL: {url}")
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError(f"Invalid source URL, https required: {url}")
 
-    r = requests.get(url, timeout=(10, 60), headers={"User-Agent": USER_AGENT})
-    r.raise_for_status()
+    with requests.get(
+        url,
+        timeout=(10, 60),
+        headers={"User-Agent": USER_AGENT},
+        stream=True,
+    ) as r:
+        r.raise_for_status()
 
-    return url, r.text
+        if urlsplit(r.url).scheme != "https":
+            raise ValueError(f"Source {url} redirected to a non-https URL: {r.url}")
+
+        chunks: list[bytes] = []
+        size = 0
+
+        for chunk in r.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):
+            size += len(chunk)
+
+            if size > MAX_SOURCE_BYTES:
+                raise ValueError(f"Source {url} exceeds size limit of {MAX_SOURCE_BYTES} bytes")
+
+            chunks.append(chunk)
+
+        encoding = r.encoding or r.apparent_encoding or "utf-8"
+
+    return url, b"".join(chunks).decode(encoding, errors="replace")
 
 
 def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[str], dict[str, int]]:
