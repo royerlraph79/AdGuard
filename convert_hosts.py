@@ -6,6 +6,7 @@ import fnmatch
 import logging
 import os
 import re
+import tempfile
 from collections import defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,6 +37,30 @@ VALID_HOST_RE = re.compile(
 USER_AGENT = "royerlraph79-AdGuardBlocklist/10.1 (+https://github.com/royerlraph79/AdGuard)"
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=None)
 OUTPUT_TIMEZONE = ZoneInfo("America/Montreal")
+
+
+class SourceConfigError(Exception):
+    """Raised when the sources file itself is missing, unreadable or unusable."""
+
+
+class SourceQualityError(Exception):
+    """Raised when too many sources are unusable to trust the generated list."""
+
+
+class OutputWriteError(Exception):
+    """Raised when the generated blocklist could not be written."""
+
+
+@dataclass(frozen=True)
+class SourceLoadResult:
+    entries: set[str]
+    stats: dict[str, int]
+    failed_urls: list[str]
+    empty_urls: list[str]
+
+    @property
+    def unusable_urls(self) -> list[str]:
+        return self.failed_urls + self.empty_urls
 
 
 @dataclass(frozen=True)
@@ -101,6 +126,7 @@ def make_stats() -> dict[str, int]:
         "valid_entries_seen": 0,
         "unique_entries": 0,
         "fetch_failures": 0,
+        "empty_sources": 0,
         "registrable_collapsed": 0,
         "subdomain_pruned": 0,
         "plain_removed_by_wildcards": 0,
@@ -249,7 +275,13 @@ def normalize_token_to_entry(token: str) -> str:
 
 
 def registrable_domain(host: str) -> str:
-    ext = _EXTRACT(host)
+    try:
+        ext = _EXTRACT(host)
+    except Exception:
+        logging.warning(
+            "Suffix extraction failed for %s; keeping host as-is", host, exc_info=True
+        )
+        return host
 
     if not ext.domain or not ext.suffix:
         return host
@@ -486,22 +518,42 @@ def _parse_source_text(text: str) -> tuple[set[str], dict[str, int]]:
     return found, stats
 
 
-def _fetch_one(url: str) -> tuple[str, str]:
-    parsed = urlsplit(url)
+def validate_source_urls(urls: Iterable[str]) -> list[str]:
+    valid: list[str] = []
+    invalid: list[str] = []
 
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError(f"Invalid URL: {url}")
+    for url in urls:
+        parsed = urlsplit(url)
 
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            valid.append(url)
+        else:
+            invalid.append(url)
+
+    if invalid:
+        raise SourceConfigError(
+            "Unsupported source URL(s), expected http(s): " + ", ".join(invalid)
+        )
+
+    return valid
+
+
+def _fetch_one(url: str) -> str:
     r = requests.get(url, timeout=(10, 60), headers={"User-Agent": USER_AGENT})
     r.raise_for_status()
 
-    return url, r.text
+    if not r.encoding:
+        r.encoding = "utf-8"
+
+    return r.text
 
 
-def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[str], dict[str, int]]:
+def load_all_sources_concurrently(urls: list[str], threads: int) -> SourceLoadResult:
     merged: set[str] = set()
     global_stats = make_stats()
     total_unique_per_source = 0
+    failed_urls: list[str] = []
+    empty_urls: list[str] = []
 
     threads = max(1, threads)
 
@@ -514,23 +566,27 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
             url = futs[fut]
 
             try:
-                _, text = fut.result()
-            except RequestException as e:
-                logging.error("Fetch failed %s: %s", url, e)
+                text = fut.result()
+            except RequestException:
+                logging.exception("Fetch failed %s", url)
                 global_stats["fetch_failures"] += 1
-                continue
-            except Exception as e:
-                logging.error("Unexpected error fetching %s: %s", url, e)
-                global_stats["fetch_failures"] += 1
+                failed_urls.append(url)
                 continue
 
             found, stats = _parse_source_text(text)
             total_unique_per_source += len(found)
             merged |= found
 
-            for k in global_stats:
-                if k in stats:
-                    global_stats[k] += stats[k]
+            for k, v in stats.items():
+                global_stats[k] += v
+
+            if not found:
+                logging.error(
+                    "Source %s returned %d lines but no usable entries", url, stats["total_lines"]
+                )
+                global_stats["empty_sources"] += 1
+                empty_urls.append(url)
+                continue
 
             logging.info(
                 "Done %s | lines=%d unique=%d invalid=%d ignored=%d",
@@ -547,13 +603,68 @@ def load_all_sources_concurrently(urls: list[str], threads: int) -> tuple[set[st
     logging.info("Global unique entries after union: %d", len(merged))
     logging.info("Cross-source overlap estimate: %d", max(0, total_unique_per_source - len(merged)))
 
-    return merged, global_stats
+    return SourceLoadResult(
+        entries=merged,
+        stats=global_stats,
+        failed_urls=failed_urls,
+        empty_urls=empty_urls,
+    )
+
+
+def check_source_quality(
+    result: SourceLoadResult,
+    *,
+    total_sources: int,
+    max_unusable: int,
+) -> None:
+    unusable = result.unusable_urls
+
+    if not unusable:
+        return
+
+    detail = ", ".join(unusable)
+
+    if len(unusable) >= total_sources:
+        raise SourceQualityError(f"All {total_sources} sources were unusable: {detail}")
+
+    if len(unusable) > max_unusable:
+        raise SourceQualityError(
+            f"{len(unusable)} of {total_sources} sources were unusable "
+            f"(limit {max_unusable}): {detail}"
+        )
+
+    logging.warning(
+        "Continuing with %d of %d sources unusable (limit %d): %s",
+        len(unusable),
+        total_sources,
+        max_unusable,
+        detail,
+    )
+
+
+def read_source_urls(source_path: Path) -> list[str]:
+    try:
+        raw = source_path.read_text(encoding="utf-8")
+    except FileNotFoundError as e:
+        raise SourceConfigError(f"Source file not found: {source_path}") from e
+    except UnicodeDecodeError as e:
+        raise SourceConfigError(f"Source file {source_path} is not valid UTF-8: {e}") from e
+    except OSError as e:
+        raise SourceConfigError(f"Could not read source file {source_path}: {e}") from e
+
+    urls = [line.strip() for line in raw.splitlines() if not is_comment_or_empty(line)]
+
+    if not urls:
+        raise SourceConfigError(f"No sources found in {source_path}")
+
+    return validate_source_urls(urls)
 
 
 def write_output(output_path: Path, entries: set[str], stats: dict[str, int]) -> None:
     logging.info("Writing output to %s", output_path)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not entries:
+        raise SourceQualityError("No entries to write; refusing to write an empty blocklist.")
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     now_local = datetime.now(OUTPUT_TIMEZONE).strftime("%a %b %d %Y %I:%M:%S %p %Z")
@@ -564,6 +675,7 @@ def write_output(output_path: Path, entries: set[str], stats: dict[str, int]) ->
         f"! Generated: {now_utc} ({now_local})\n"
         f"! Entries: {len(entries)}\n"
         f"! Fetch failures: {stats['fetch_failures']}\n"
+        f"! Empty sources: {stats['empty_sources']}\n"
         f"! Registrable collapsed: {stats['registrable_collapsed']}\n"
         f"! Subdomains pruned: {stats['subdomain_pruned']}\n"
         f"! Plain removed by wildcards: {stats['plain_removed_by_wildcards']}\n"
@@ -579,7 +691,34 @@ def write_output(output_path: Path, entries: set[str], stats: dict[str, int]) ->
         if i % 20_000 == 0:
             logging.info("  ... prepared %d entries", i)
 
-    output_path.write_text(header + "".join(lines), encoding="utf-8")
+    _write_atomically(output_path, header + "".join(lines))
+
+
+def _write_atomically(output_path: Path, content: str) -> None:
+    """Write via a temporary file so a failure never truncates an existing blocklist."""
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+    except OSError as e:
+        raise OutputWriteError(f"Could not write output to {output_path}: {e}") from e
+
+    try:
+        os.replace(tmp_path, output_path)
+    except OSError as e:
+        tmp_path.unlink(missing_ok=True)
+        raise OutputWriteError(f"Could not replace {output_path}: {e}") from e
 
 
 def main() -> None:
@@ -626,42 +765,43 @@ def main() -> None:
         help="Parse and dedupe without writing output",
     )
 
+    parser.add_argument(
+        "--max-unusable-sources",
+        type=int,
+        default=0,
+        help=(
+            "Number of sources allowed to fail or yield no entries before the run "
+            "is treated as failed"
+        ),
+    )
+
     args = parser.parse_args()
     setup_logging(args.verbose)
+
+    if args.max_unusable_sources < 0:
+        parser.error("--max-unusable-sources must be >= 0")
 
     source_path = Path(args.source)
     output_path = Path(args.output)
 
-    if not source_path.exists():
-        logging.error("Source file not found: %s", source_path)
-        raise SystemExit(1)
-
-    urls = [
-        line.strip()
-        for line in source_path.read_text(encoding="utf-8").splitlines()
-        if not is_comment_or_empty(line)
-    ]
-
-    if not urls:
-        logging.error("No sources found in %s", source_path)
-        raise SystemExit(1)
+    urls = read_source_urls(source_path)
 
     logging.info("Starting blocklist generation | sources=%d", len(urls))
 
-    raw_entries, stats = load_all_sources_concurrently(urls, threads=args.threads)
+    result = load_all_sources_concurrently(urls, threads=args.threads)
+    stats = result.stats
 
-    if stats["fetch_failures"] == len(urls):
-        logging.error("All source fetches failed; refusing to write empty blocklist.")
-        raise SystemExit(1)
+    check_source_quality(result, total_sources=len(urls), max_unusable=args.max_unusable_sources)
 
     logging.info(
-        "Raw unique entries: %d | fetch failures: %d",
-        len(raw_entries),
+        "Raw unique entries: %d | fetch failures: %d | empty sources: %d",
+        len(result.entries),
         stats["fetch_failures"],
+        stats["empty_sources"],
     )
 
     final_entries = dedupe_entries(
-        raw_entries,
+        result.entries,
         collapse_to_registrable=args.collapse_registrable,
         dedupe_subdomains=not args.no_dedupe_subdomains,
         dedupe_plain_covered_by_wildcards=not args.no_dedupe_plain_covered_by_wildcards,
@@ -680,4 +820,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (SourceConfigError, SourceQualityError, OutputWriteError) as exc:
+        logging.error("%s", exc)
+        raise SystemExit(1) from exc

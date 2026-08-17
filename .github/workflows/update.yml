@@ -93,6 +93,7 @@ jobs:
             --output adguard_blocklist.txt \
             --threads 16 \
             --dedupe-wildcards-conservative \
+            --max-unusable-sources 1 \
             --check \
             -v
 
@@ -107,6 +108,7 @@ jobs:
             --output adguard_blocklist.txt \
             --threads 16 \
             --dedupe-wildcards-conservative \
+            --max-unusable-sources 1 \
             -v
 
       - name: 👀 Validate generated output
