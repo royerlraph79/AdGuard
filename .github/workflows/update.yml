@@ -53,7 +53,7 @@ jobs:
         if: steps.montreal-time.outputs.run_now == 'true'
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14.6"
+          python-version: "3.14.7"
           cache: "pip"
 
       - name: 📦 Install dependencies
