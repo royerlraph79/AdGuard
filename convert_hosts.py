@@ -574,7 +574,7 @@ def write_output(output_path: Path, entries: set[str], stats: dict[str, int]) ->
     lines = []
 
     for i, e in enumerate(sorted(entries), 1):
-        lines.append(f"||{e}^\n")
+        lines.append(f"||{e}^$important\n")
 
         if i % 20_000 == 0:
             logging.info("  ... prepared %d entries", i)
