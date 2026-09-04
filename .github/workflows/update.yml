@@ -64,6 +64,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 🔍 Install ripgrep
+        if: steps.montreal-time.outputs.run_now == 'true'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
       - name: 🔎 Validate inputs
         if: steps.montreal-time.outputs.run_now == 'true'
         shell: bash
@@ -73,7 +80,7 @@ jobs:
           test -f convert_hosts.py
           test -f sources.txt
 
-          SOURCE_COUNT="$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*\(#\|!\|;\|//\)' sources.txt || true)"
+          SOURCE_COUNT="$(rg -c '^\s*$|^\s*[#!;/]' sources.txt --invert-match || true)"
           echo "Source count: $SOURCE_COUNT"
           echo "### Source count: $SOURCE_COUNT" >> "$GITHUB_STEP_SUMMARY"
 
@@ -118,7 +125,7 @@ jobs:
           test -f adguard_blocklist.txt
 
           FILE_SIZE="$(wc -c < adguard_blocklist.txt)"
-          RULES="$(grep -c -E '^\|\|.+\^\$' adguard_blocklist.txt || true)"
+          RULES="$(rg -c '^\|\|.+\^\$' adguard_blocklist.txt || true)"
 
           echo "Generated file size: $FILE_SIZE bytes"
           echo "Rule count: $RULES"
@@ -136,7 +143,7 @@ jobs:
             echo
             echo "### First rules"
             echo '```'
-            grep -m 20 -E '^\|\|.+\^$' adguard_blocklist.txt || true
+            rg -m 20 '^\|\|.+\^\$' adguard_blocklist.txt || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
