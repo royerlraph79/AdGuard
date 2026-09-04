@@ -118,7 +118,7 @@ jobs:
           test -f adguard_blocklist.txt
 
           FILE_SIZE="$(wc -c < adguard_blocklist.txt)"
-          RULES="$(grep -c -E '^\|\|.+\^$' adguard_blocklist.txt || true)"
+          RULES="$(grep -c -E '^\|\|.+\^\$' adguard_blocklist.txt || true)"
 
           echo "Generated file size: $FILE_SIZE bytes"
           echo "Rule count: $RULES"
